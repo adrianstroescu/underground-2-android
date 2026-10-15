@@ -171,7 +171,7 @@ fn track(game: &str, loc: &str) -> Result<()> {
             for t in &p.textures {
                 n_tex += 1;
                 *formats.entry(format!("{:?}", t.format)).or_default() += 1;
-                *alpha.entry(format!("{:?}", t.alpha)).or_default() += 1;
+                *alpha.entry(format!("{:?}/blend{}", t.alpha, t.alpha_blend)).or_default() += 1;
             }
         }
         for sc in d.scenery {
@@ -193,6 +193,35 @@ fn track(game: &str, loc: &str) -> Result<()> {
     for (name, n) in top.iter().take(15) {
         let full = insts.iter().find(|i| &i.name == name).unwrap();
         println!("  unresolved {name} x{n} lods={:08X?} hash(name)={:08X}", full.lods, ug2_formats::bin_hash(name));
+    }
+    // Solids drawn with textures that no texture pack provides.
+    let mut tex_hashes = std::collections::HashSet::new();
+    let mut solid_tex: BTreeMap<String, (Vec<u32>, usize)> = BTreeMap::new();
+    for s in &sections {
+        if s.offset + s.size > stream.len() {
+            continue;
+        }
+        let d = parse_region(&stream, s.offset, s.size);
+        for p in &d.textures {
+            tex_hashes.extend(p.textures.iter().map(|t| t.hash));
+        }
+        for l in &d.solids {
+            for so in &l.solids {
+                let n = so.mesh.as_ref().map_or(0, |m| m.indices.len() / 3);
+                solid_tex.insert(so.name.clone(), (so.textures.clone(), n));
+            }
+        }
+    }
+    let mut missing: Vec<(String, usize, usize)> = solid_tex
+        .iter()
+        .filter(|(_, (t, n))| *n > 0 && !t.is_empty())
+        .map(|(name, (t, n))| (name.clone(), t.iter().filter(|h| !tex_hashes.contains(h)).count(), *n))
+        .filter(|(_, m, _)| *m > 0)
+        .collect();
+    missing.sort_by(|a, b| b.2.cmp(&a.2));
+    println!("solids with missing textures: {}", missing.len());
+    for (name, m, n) in missing.iter().take(25) {
+        println!("  {name:30} missing {m} tris {n}");
     }
     println!("parsed in {:.2?}", t0.elapsed());
     println!("solids {n_solids} (tris {n_tris}), textures {n_tex}, instances {n_inst}, unresolved LOD-A {missing_lod}");

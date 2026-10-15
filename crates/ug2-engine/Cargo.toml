@@ -1,5 +1,15 @@
 [package]
 name = "ug2-engine"
+description = "Platform-independent game engine: rendering, physics, input, touch HUD"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+ug2-formats.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+anyhow.workspace = true
+pollster.workspace = true

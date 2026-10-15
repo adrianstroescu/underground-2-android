@@ -47,6 +47,8 @@ pub struct Texture {
     /// BGRA palette for P8.
     pub palette: Vec<u8>,
     pub alpha: AlphaUsage,
+    /// TextureInfo::AlphaBlendType (0 = normal, 1 = additive, ...).
+    pub alpha_blend: u8,
     pub tileable: u8,
 }
 
@@ -71,6 +73,7 @@ struct TexInfo {
     mips: u8,
     tileable: u8,
     alpha_usage: u8,
+    alpha_blend: u8,
 }
 
 fn parse_info(b: &[u8]) -> Result<TexInfo> {
@@ -87,6 +90,7 @@ fn parse_info(b: &[u8]) -> Result<TexInfo> {
         mips: u8_at(b, 0x4E)?,
         tileable: u8_at(b, 0x4F)?,
         alpha_usage: u8_at(b, 0x55)?,
+        alpha_blend: u8_at(b, 0x56)?,
     })
 }
 
@@ -133,6 +137,7 @@ fn make_texture(info: TexInfo, format: TexFormat, data: &[u8], palette_src: &[u8
             1 => AlphaUsage::Cutout,
             _ => AlphaUsage::Blend,
         },
+        alpha_blend: info.alpha_blend,
         tileable: info.tileable,
     })
 }

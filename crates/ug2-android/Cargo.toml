@@ -1,5 +1,17 @@
 [package]
 name = "ug2-android"
+description = "Android entry point (NativeActivity, no Java)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[lib]
+name = "ug2"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "android")'.dependencies]
+ug2-engine.workspace = true
+log.workspace = true
+raw-window-handle.workspace = true
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"

@@ -1,5 +1,15 @@
 [package]
 name = "ug2-desktop"
+description = "Desktop host for development: window, keyboard, mouse-as-touch, screenshots"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+ug2-engine.workspace = true
+glam.workspace = true
+log.workspace = true
+anyhow.workspace = true
+png.workspace = true
+winit = "0.30"
+env_logger = "0.11"

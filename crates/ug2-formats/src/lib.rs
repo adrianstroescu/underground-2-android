@@ -6,6 +6,7 @@
 
 pub mod bytes;
 pub mod car;
+pub mod carinfo;
 pub mod chunk;
 pub mod compression;
 pub mod dxt;

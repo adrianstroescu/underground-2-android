@@ -17,7 +17,8 @@ repository = "https://github.com/adrianstroescu/underground-2-android"
 [workspace.dependencies]
 ug2-formats = { path = "crates/ug2-formats" }
 ug2-engine = { path = "crates/ug2-engine" }
-wgpu = "25"
+# Vulkan only: Android target; DX12 also breaks windows-gnu dev builds.
+wgpu = { version = "25", default-features = false, features = ["vulkan", "wgsl"] }
 glam = { version = "0.30", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
