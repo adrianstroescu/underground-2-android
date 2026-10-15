@@ -1,7 +1,7 @@
 //! Car type table (`CarTypeInfo`, chunk 0x00034600 in GLOBAL/GLOBALB): one 0x890-byte
 //! record per car with names, file paths, wheel placement and handling data.
 
-use crate::bytes::{cstr_at, f32_at, vec3_at};
+use crate::bytes::{cstr_at, f32_at, u32_at, vec3_at};
 use crate::chunk::ChunkIter;
 use crate::{bail, Result};
 
@@ -9,6 +9,8 @@ const CAR_TYPE_INFO: u32 = 0x0003_4600;
 const RECORD_LEN: usize = 0x890;
 const WHEELS_AT: usize = 0x120;
 const WHEEL_LEN: usize = 0x30;
+/// 0 for the 31 cars players and racers drive, 2 for traffic.
+const USAGE_AT: usize = 0x844;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WheelInfo {
@@ -18,10 +20,18 @@ pub struct WheelInfo {
     pub width: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CarUsage {
+    Racer,
+    Traffic,
+    Other(u32),
+}
+
 #[derive(Clone, Debug)]
 pub struct CarTypeInfo {
     pub name: String,
     pub wheels: [WheelInfo; 4],
+    pub usage: CarUsage,
 }
 
 pub fn parse_car_types(global_b: &[u8]) -> Result<Vec<CarTypeInfo>> {
@@ -38,7 +48,12 @@ pub fn parse_car_types(global_b: &[u8]) -> Result<Vec<CarTypeInfo>> {
             let o = WHEELS_AT + i * WHEEL_LEN;
             *w = WheelInfo { position: vec3_at(rec, o)?, radius: f32_at(rec, o + 0x10)?, width: f32_at(rec, o + 0x14)? };
         }
-        out.push(CarTypeInfo { name: cstr_at(rec, 0, 32)?, wheels });
+        let usage = match u32_at(rec, USAGE_AT)? {
+            0 => CarUsage::Racer,
+            2 => CarUsage::Traffic,
+            n => CarUsage::Other(n),
+        };
+        out.push(CarTypeInfo { name: cstr_at(rec, 0, 32)?, wheels, usage });
     }
     Ok(out)
 }

@@ -13,8 +13,11 @@ struct Globals {
 struct Model {
     model: mat4x4<f32>,
     tint: vec4<f32>,
-    // x = lit (car shading), y = alpha cutoff, z = fog on, w = vertex colour scale
+    // x = mode (0 world, 1 car, 2 glass, 3 unlit), y = alpha cutoff, z = fog on,
+    // w = vertex colour scale
     params: vec4<f32>,
+    // Light emitted on top of the lit colour (lamps), as a multiple of the texture.
+    emissive: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -54,7 +57,10 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSample(t_diffuse, s_diffuse, i.uv);
     var rgb: vec3<f32>;
     var a = tex.a * m.tint.a;
-    if (m.params.x > 0.5) {
+    if (m.params.x > 2.5) {
+        // Unlit (shadows, decals).
+        rgb = tex.rgb * m.tint.rgb;
+    } else if (m.params.x > 0.5) {
         // Car: moonlight + city ambient, specular highlight and a cheap sky reflection.
         let n = normalize(i.normal);
         let l = normalize(g.light_dir.xyz);
@@ -62,11 +68,26 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         let diff = max(dot(n, l), 0.0);
         let h = normalize(l + v);
         let spec = pow(max(dot(n, h), 0.0), 60.0) * 0.8;
-        let fres = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 4.0);
+        let fres = pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 4.0);
         let r = reflect(-v, n);
-        let env = mix(vec3<f32>(0.04, 0.05, 0.08), vec3<f32>(0.30, 0.38, 0.55), clamp(r.z * 0.5 + 0.5, 0.0, 1.0));
-        let base = tex.rgb * m.tint.rgb;
-        rgb = base * (g.ambient.rgb + diff * 0.75) + vec3<f32>(spec) + env * (0.15 + 0.6 * fres);
+        // Night sky above, city glow at the horizon, dark street below.
+        let up = r.z * 0.5 + 0.5;
+        let env = mix(mix(vec3<f32>(0.03, 0.035, 0.05), vec3<f32>(0.42, 0.40, 0.45), smoothstep(0.35, 0.5, up)),
+                      vec3<f32>(0.20, 0.27, 0.42), smoothstep(0.55, 0.9, up));
+        var base = tex.rgb * m.tint.rgb;
+        if (m.emissive.w > 0.5) {
+            // Paint with the car's detail atlas laid over it.
+            base = mix(m.tint.rgb, tex.rgb, tex.a);
+            a = m.tint.a;
+        }
+        if (m.params.x > 1.5) {
+            // Glass: mostly reflection; more opaque at grazing angles.
+            rgb = base * g.ambient.rgb + env * (0.35 + 0.65 * fres) + vec3<f32>(spec * 1.2);
+            a = clamp(max(a, 0.55) + fres * 0.4, 0.0, 0.95);
+        } else {
+            rgb = base * (g.ambient.rgb + diff * 0.75) + vec3<f32>(spec) + env * (0.12 + 0.6 * fres);
+        }
+        rgb = rgb + tex.rgb * m.emissive.rgb;
     } else {
         rgb = tex.rgb * m.tint.rgb * i.color.rgb * m.params.w;
         a = a * i.color.a;

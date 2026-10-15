@@ -84,6 +84,41 @@ fn car(game: &str, name: &str, out: Option<PathBuf>) -> Result<()> {
         }
     }
     println!("  stock parts: {}", stock.len());
+    if stock.is_empty() {
+        for s in &solids {
+            println!("    solid {} tex {:08X?}", s.name, s.textures);
+        }
+    }
+    // Where each referenced texture comes from: the car's own pack, the shared car
+    // pack, GLOBALB, or nowhere (supplied at runtime: paint, lights, glass...).
+    let mut names: BTreeMap<u32, String> = BTreeMap::new();
+    for p in &packs {
+        names.extend(p.textures.iter().map(|t| (t.hash, format!("car:{}", t.name))));
+    }
+    for (file, tag) in [("CARS/TEXTURES.BIN", "shared"), ("GLOBAL/GLOBALB.BUN", "global")] {
+        if let Ok(d) = game.read_unpacked(file) {
+            for p in find_tpks(&d) {
+                for t in p.textures {
+                    names.entry(t.hash).or_insert(format!("{tag}:{}", t.name));
+                }
+            }
+        }
+    }
+    let mut unresolved: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for s in &stock {
+        let refs: Vec<String> = s
+            .textures
+            .iter()
+            .map(|h| names.get(h).cloned().unwrap_or_else(|| format!("?{h:08X}")))
+            .collect();
+        println!("    {} -> {}", s.name, refs.join(" "));
+        for h in &s.textures {
+            if !names.contains_key(h) {
+                unresolved.entry(*h).or_default().push(s.name.clone());
+            }
+        }
+    }
+    println!("  unresolved texture hashes: {}", unresolved.len());
     for s in &stock {
         let m = s.mesh.as_ref();
         println!(

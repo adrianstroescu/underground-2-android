@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use ug2_formats::car::{stock_part_hashes, PartKind};
-use ug2_formats::carinfo::{parse_car_types, WheelInfo};
+use ug2_formats::carinfo::CarUsage;
 use ug2_formats::fs::GameDir;
 use ug2_formats::scenery::ScenerySection;
-use ug2_formats::solid::{find_solid_lists, Solid};
+use ug2_formats::solid::Solid;
 use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 use ug2_formats::track::{parse_region, parse_streaming_sections};
 
+use crate::cars::{load_car, CarModel, SharedCarData};
 use crate::collision::CollisionWorld;
 
 #[repr(C)]
@@ -35,6 +35,23 @@ pub enum Blend {
     Additive,
 }
 
+/// How a draw range is lit; cars use several, the world only `Normal`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Role {
+    Normal,
+    /// Player paint: drawn untextured with the paint colour.
+    Paint,
+    /// Player paint with the car's detail atlas (door lines, badges, grille) blended in
+    /// by the texture's alpha: what the game composites into `<CAR>_SKIN1`.
+    PaintDetail,
+    /// Traffic paint job; the texture can be swapped per car.
+    Skin,
+    Glass,
+    Headlight,
+    Brakelight,
+    Shadow,
+}
+
 /// Texture hash used for car paint (groups whose texture is supplied by a shader).
 pub const PAINT: u32 = 0xFFFF_FFFF;
 
@@ -42,6 +59,7 @@ pub const PAINT: u32 = 0xFFFF_FFFF;
 pub struct DrawRange {
     pub texture: u32,
     pub blend: Blend,
+    pub role: Role,
     pub first_index: u32,
     pub index_count: u32,
 }
@@ -71,17 +89,13 @@ pub struct PreparedTexture {
     pub data: Vec<u8>,
 }
 
-pub struct CarAsset {
-    pub name: String,
-    pub body: MeshData,
-    pub wheel: Option<MeshData>,
-    pub wheels: [WheelInfo; 4],
-}
-
 pub enum LoadEvent {
     Progress(String),
     Textures(Vec<PreparedTexture>),
-    Car(CarAsset),
+    /// Car lists from CarTypeInfo.
+    CarList { racers: Vec<String>, traffic: Vec<String> },
+    Car(Box<CarModel>),
+    CarFailed(String),
     Collision(CollisionWorld),
     Spawn { pos: Vec3, yaw: f32 },
     Section(SectionAsset),
@@ -96,30 +110,70 @@ pub struct LoaderConfig {
     pub bc_textures: bool,
 }
 
-pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Receiver<LoadEvent> {
+/// Requests the game sends to the loader thread.
+pub enum LoadRequest {
+    Car(String),
+}
+
+/// Background loader: loads the player's car and the world, then serves car requests.
+pub struct Loader {
+    pub events: Receiver<LoadEvent>,
+    requests: Sender<LoadRequest>,
+}
+
+impl Loader {
+    pub fn request(&self, r: LoadRequest) {
+        let _ = self.requests.send(r);
+    }
+}
+
+pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
     let (tx, rx) = channel();
+    let (req_tx, req_rx) = channel::<LoadRequest>();
     std::thread::Builder::new()
         .name("ug2-loader".into())
         .spawn(move || {
-            if let Err(e) = load_all(&game, &cfg, &tx) {
+            let shared = SharedCarData::load(&game);
+            let racers = shared.names(CarUsage::Racer);
+            let traffic = shared.names(CarUsage::Traffic);
+            let _ = tx.send(LoadEvent::CarList { racers, traffic });
+            send_car(&game, &shared, &cfg, &cfg.car, &tx);
+            if let Err(e) = load_world(&game, &cfg, &tx) {
                 log::error!("load failed: {e:#}");
                 let _ = tx.send(LoadEvent::Failed(format!("{e:#}")));
+                return;
+            }
+            for req in req_rx {
+                match req {
+                    LoadRequest::Car(name) => send_car(&game, &shared, &cfg, &name, &tx),
+                }
             }
         })
         .expect("spawn loader thread");
-    rx
+    Loader { events: rx, requests: req_tx }
 }
 
-fn load_all(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
+fn send_car(game: &GameDir, shared: &SharedCarData, cfg: &LoaderConfig, name: &str, tx: &Sender<LoadEvent>) {
+    let t0 = std::time::Instant::now();
+    match load_car(game, shared, name) {
+        Ok((car, textures)) => {
+            let prepared = textures.iter().filter_map(|t| prepare_texture(t, cfg.bc_textures)).collect();
+            let _ = tx.send(LoadEvent::Textures(prepared));
+            log::info!("car {name} loaded in {:.0?}", t0.elapsed());
+            let _ = tx.send(LoadEvent::Car(Box::new(car)));
+        }
+        Err(e) => {
+            log::error!("car {name}: {e:#}");
+            let _ = tx.send(LoadEvent::CarFailed(name.to_string()));
+        }
+    }
+}
+
+fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let send = |e: LoadEvent| {
         let _ = tx.send(e);
     };
-
-    send(LoadEvent::Progress(format!("LOADING CAR {}", cfg.car)));
-    let (car, car_textures) = load_car(game, &cfg.car)?;
-    send(LoadEvent::Textures(car_textures.iter().filter_map(|t| prepare_texture(t, cfg.bc_textures)).collect()));
-    send(LoadEvent::Car(car));
 
     send(LoadEvent::Progress("READING TRACK".into()));
     let index = game.read(&format!("TRACKS/{}.BUN", cfg.location))?;
@@ -209,7 +263,7 @@ fn load_all(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> anyho
     Ok(())
 }
 
-fn blend_for(t: &Texture) -> Blend {
+pub fn blend_for(t: &Texture) -> Blend {
     match t.alpha {
         AlphaUsage::Opaque => Blend::Opaque,
         AlphaUsage::Cutout => Blend::Cutout,
@@ -247,13 +301,15 @@ fn d3d_color(c: u32) -> [u8; 4] {
     [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]
 }
 
+pub type Buckets = HashMap<(Blend, u32, Role), Vec<u32>>;
+
 /// Appends a solid's mesh transformed by `m`, bucketing indices by texture.
-fn append_solid(
+pub fn append_solid(
     s: &Solid,
     m: &Mat4,
     vertices: &mut Vec<GpuVertex>,
-    buckets: &mut HashMap<(Blend, u32), Vec<u32>>,
-    texture_of: &dyn Fn(u32) -> (u32, Blend),
+    buckets: &mut Buckets,
+    texture_of: &dyn Fn(u32) -> (u32, Blend, Role),
     bbox: &mut (Vec3, Vec3),
 ) {
     let Some(mesh) = &s.mesh else { return };
@@ -274,22 +330,28 @@ fn append_solid(
     }
     for g in &mesh.groups {
         let hash = s.textures.get(g.texture as usize).copied().unwrap_or(0);
-        let (tex, blend) = texture_of(hash);
-        let out = buckets.entry((blend, tex)).or_default();
+        let (tex, blend, role) = texture_of(hash);
+        let out = buckets.entry((blend, tex, role)).or_default();
         let idx = &mesh.indices[g.first_index as usize..(g.first_index + g.index_count) as usize];
         out.extend(idx.iter().map(|&i| base + i as u32));
     }
 }
 
-fn finish_mesh(vertices: Vec<GpuVertex>, buckets: HashMap<(Blend, u32), Vec<u32>>, bbox: (Vec3, Vec3)) -> MeshData {
-    let mut keys: Vec<(Blend, u32)> = buckets.keys().copied().collect();
+pub fn finish_mesh(vertices: Vec<GpuVertex>, buckets: Buckets, bbox: (Vec3, Vec3)) -> MeshData {
+    let mut keys: Vec<(Blend, u32, Role)> = buckets.keys().copied().collect();
     keys.sort();
     let mut indices = Vec::new();
     let mut ranges = Vec::new();
     let mut buckets = buckets;
     for k in keys {
         let idx = buckets.remove(&k).unwrap();
-        ranges.push(DrawRange { texture: k.1, blend: k.0, first_index: indices.len() as u32, index_count: idx.len() as u32 });
+        ranges.push(DrawRange {
+            texture: k.1,
+            blend: k.0,
+            role: k.2,
+            first_index: indices.len() as u32,
+            index_count: idx.len() as u32,
+        });
         indices.extend(idx);
     }
     MeshData { vertices, indices, ranges, bbox_min: bbox.0, bbox_max: bbox.1 }
@@ -303,7 +365,7 @@ fn build_section_mesh(
     let mut vertices = Vec::new();
     let mut buckets = HashMap::new();
     let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    let texture_of = |h: u32| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque));
+    let texture_of = |h: u32| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal);
     for inst in &sc.instances {
         let Some(solid) = instance_solid(sc, inst, solids) else { continue };
         let m = Mat4::from_cols_array(&inst.matrix());
@@ -318,7 +380,7 @@ fn build_sky_mesh(sc: &ScenerySection, solids: &HashMap<u32, Arc<Solid>>, blend_
     let mut vertices = Vec::new();
     let mut buckets = HashMap::new();
     let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    let texture_of = |h: u32| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque));
+    let texture_of = |h: u32| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal);
     for inst in &sc.instances {
         if !sc.infos[inst.info as usize].name.starts_with("SKYDOME") {
             continue;
@@ -389,63 +451,6 @@ fn build_collision(
     });
     log::info!("collision: {} triangles, spawn {:?}", world.tris.len(), spawn);
     (world, spawn)
-}
-
-fn load_car(game: &GameDir, name: &str) -> anyhow::Result<(CarAsset, Vec<Texture>)> {
-    let geo = game.read(&format!("CARS/{name}/GEOMETRY.BIN"))?;
-    let mut textures: Vec<Texture> = find_tpks(&game.read(&format!("CARS/{name}/TEXTURES.BIN"))?)
-        .into_iter()
-        .flat_map(|p| p.textures)
-        .collect();
-    if let Ok(shared) = game.read("CARS/TEXTURES.BIN") {
-        textures.extend(find_tpks(&shared).into_iter().flat_map(|p| p.textures));
-    }
-    let solids: Vec<Solid> = find_solid_lists(&geo).into_iter().flat_map(|l| l.solids).collect();
-
-    let have: HashMap<u32, Blend> = textures.iter().map(|t| (t.hash, blend_for(t))).collect();
-    let texture_of = |h: u32| match have.get(&h) {
-        Some(&b) => (h, b),
-        None => (PAINT, Blend::Opaque),
-    };
-
-    let mut body_v = Vec::new();
-    let mut body_b = HashMap::new();
-    let mut body_box = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    let mut wheel = None;
-    let mut used: HashSet<u32> = HashSet::new();
-    for (hash, kind) in stock_part_hashes(name) {
-        let Some(s) = solids.iter().find(|s| s.hash == hash) else { continue };
-        used.extend(s.textures.iter().copied());
-        match kind {
-            PartKind::Body => append_solid(s, &Mat4::IDENTITY, &mut body_v, &mut body_b, &texture_of, &mut body_box),
-            PartKind::FrontWheel => {
-                let (mut v, mut b, mut bb) = (Vec::new(), HashMap::new(), (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)));
-                append_solid(s, &Mat4::IDENTITY, &mut v, &mut b, &texture_of, &mut bb);
-                wheel = Some(finish_mesh(v, b, bb));
-            }
-            PartKind::FrontBrake | PartKind::RearBrake => {}
-        }
-    }
-    if body_v.is_empty() {
-        anyhow::bail!("car {name}: no stock parts found");
-    }
-
-    let global_b = game.read("GLOBAL/GLOBALB.BUN").or_else(|_| game.read_unpacked("GLOBAL/GlobalB.lzc"));
-    let info = global_b
-        .ok()
-        .and_then(|g| parse_car_types(&g).ok())
-        .and_then(|cars| cars.into_iter().find(|c| c.name.eq_ignore_ascii_case(name)));
-    let wheels = match info {
-        Some(i) => i.wheels,
-        None => {
-            log::warn!("no CarTypeInfo for {name}, guessing wheel positions");
-            let w = |x: f32, y: f32| WheelInfo { position: [x, y, 0.17], radius: 0.33, width: 0.22 };
-            [w(1.35, 0.75), w(1.35, -0.75), w(-1.3, -0.75), w(-1.3, 0.75)]
-        }
-    };
-    let textures: Vec<Texture> = textures.into_iter().filter(|t| used.contains(&t.hash)).collect();
-    let car = CarAsset { name: name.to_string(), body: finish_mesh(body_v, body_b, body_box), wheel, wheels };
-    Ok((car, textures))
 }
 
 /// Converts a parsed texture into an upload-ready mip chain. With BC support the

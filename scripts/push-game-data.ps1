@@ -1,10 +1,10 @@
 # Copies the original game files from your PC install to the phone over adb.
-#   powershell -ExecutionPolicy Bypass -File scripts\push-game-data.ps1 -GameDir "D:\Games\NFSU2" [-Car 350Z] [-Full]
-# Default copies only what the current build loads (~150 MB); -Full copies CARS, GLOBAL,
-# TRACKS, FRONTEND, LANGUAGES, SOUND (~1.3 GB) for later milestones.
+#   powershell -ExecutionPolicy Bypass -File scripts\push-game-data.ps1 -GameDir "D:\Games\NFSU2" [-Full]
+# Default copies what the current build uses (~1.4 GB: all cars, GLOBAL, Bayview, routes,
+# sound and music); -Full also copies FRONTEND, LANGUAGES and every track region.
+# Set ANDROID_SERIAL when more than one device or emulator is attached.
 param(
     [string]$GameDir = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-    [string]$Car = "350Z",
     [switch]$Full
 )
 $ErrorActionPreference = "Stop"
@@ -18,7 +18,8 @@ if ($LASTEXITCODE -ne 0) { throw "No device: connect the phone with USB debuggin
 # Launching once makes Android create the app's data folder with the right owner.
 & adb shell am start -n "$package/.MainActivity" | Out-Null
 Start-Sleep -Seconds 2
-& adb shell mkdir -p "$dest/CARS/$Car" "$dest/GLOBAL" "$dest/TRACKS"
+& adb shell am force-stop $package
+& adb shell mkdir -p "$dest/TRACKS"
 
 function Push($rel) {
     $src = Join-Path $GameDir $rel
@@ -28,27 +29,21 @@ function Push($rel) {
     if ((Get-Item $src).PSIsContainer) { $target = (Split-Path $target -Parent).Replace('\', '/') }
     # Large pushes over USB occasionally abort mid-transfer ("write failed"); retry.
     foreach ($try in 1..3) {
-        & adb push $src $target | Select-Object -Last 1
+        & adb push --sync $src $target | Select-Object -Last 1
         if ($LASTEXITCODE -eq 0) { return }
         Write-Warning "push failed, retry $try"
     }
     throw "adb push failed for $rel"
 }
 
+foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata") { Push $d }
 if ($Full) {
-    foreach ($d in "CARS", "GLOBAL", "TRACKS", "FRONTEND", "LANGUAGES", "SOUND") { Push $d }
+    foreach ($d in "TRACKS", "FRONTEND", "LANGUAGES") { Push $d }
 } else {
-    Push "CARS\$Car\GEOMETRY.BIN"
-    Push "CARS\$Car\TEXTURES.BIN"
-    Push "CARS\TEXTURES.BIN"
-    if (Test-Path "$GameDir\GLOBAL\GLOBALB.BUN") { Push "GLOBAL\GLOBALB.BUN" } else { Push "GLOBAL\GlobalB.lzc" }
-    Push "GLOBAL\DYNTEX.BIN"
-    Push "TRACKS\L4RA.BUN"
-    Push "TRACKS\STREAML4RA.BUN"
-    Push "TRACKS\LOC4DYNTEX.BIN"
+    foreach ($f in "L4RA.BUN", "STREAML4RA.BUN", "LOC4DYNTEX.BIN", "ROUTESL4RA") { Push "TRACKS\$f" }
+    Get-ChildItem "$GameDir\TRACKS" -Filter "TRACKMAP4*.BIN" | ForEach-Object { Push "TRACKS\$($_.Name)" }
 }
 # Folders created by adb belong to the shell user (mode 2770); open them up so the
 # app's own user can read them. NFSU2 itself belongs to the app and can't be chmod-ed.
 & adb shell "chmod -R a+rwX $dest/*"
-& adb shell am force-stop $package
 Write-Host "Done. Start 'NFS Underground 2' on the phone."

@@ -8,7 +8,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
 
-use crate::assets::{Blend, DrawRange, GpuVertex, MeshData, PreparedTexture, PAINT};
+use crate::assets::{Blend, DrawRange, GpuVertex, MeshData, PreparedTexture, Role, PAINT};
+use crate::cars::CarModel;
 use crate::hud::HudVertex;
 
 pub struct Gpu {
@@ -78,17 +79,52 @@ struct ModelUniform {
     model: [[f32; 4]; 4],
     tint: [f32; 4],
     params: [f32; 4],
+    emissive: [f32; 4],
 }
 
+/// Shading modes (`params.x` in mesh.wgsl).
+const MODE_WORLD: f32 = 0.0;
+const MODE_CAR: f32 = 1.0;
+const MODE_GLASS: f32 = 2.0;
+const MODE_UNLIT: f32 = 3.0;
+
 const SLOT_STRIDE: u64 = 256;
-const SLOTS: usize = 16;
 const SLOT_WORLD: u32 = 0;
 const SLOT_WORLD_CUTOUT: u32 = 1;
 const SLOT_WORLD_BLEND: u32 = 2;
 const SLOT_SKY: u32 = 3;
-const SLOT_CAR: u32 = 4;
-const SLOT_CAR_PAINT: u32 = 5;
-const SLOT_WHEEL0: u32 = 6;
+const SLOT_GLOW: u32 = 4;
+const WORLD_SLOTS: u32 = 5;
+/// Uniform slots per drawn car, at `WORLD_SLOTS + index * CAR_SLOTS`.
+const CAR_SLOTS: u32 = 11;
+const CAR_BODY: u32 = 0;
+const CAR_PAINT: u32 = 1;
+const CAR_GLASS: u32 = 2;
+const CAR_HEAD: u32 = 3;
+const CAR_BRAKE: u32 = 4;
+const CAR_SHADOW: u32 = 5;
+const CAR_WHEEL0: u32 = 6;
+const CAR_PAINT_DETAIL: u32 = 10;
+
+struct CarGpu {
+    body: GpuMesh,
+    wheel: Option<GpuMesh>,
+    shadow: Option<GpuMesh>,
+}
+
+/// One car to draw this frame.
+#[derive(Clone, Copy)]
+pub struct CarDraw {
+    /// Index returned by [`Renderer::add_car_model`].
+    pub model: usize,
+    pub transform: Mat4,
+    pub wheels: [Mat4; 4],
+    pub paint: [f32; 3],
+    /// Replacement for a traffic car's skin texture.
+    pub skin: Option<u32>,
+    /// 0 = tail lights only, 1 = full brake lights.
+    pub brake: f32,
+}
 
 struct GpuMesh {
     vbuf: wgpu::Buffer,
@@ -103,9 +139,10 @@ pub struct FrameData<'a> {
     pub view: Mat4,
     pub fov_y: f32,
     pub cam_pos: Vec3,
-    pub car: Option<Mat4>,
-    pub wheels: [Mat4; 4],
-    pub paint: [f32; 3],
+    pub cars: &'a [CarDraw],
+    /// World-space additive quads (light glows), drawn with `glow_texture`.
+    pub glows: &'a [GpuVertex],
+    pub glow_texture: u32,
     pub draw_distance: f32,
     pub vertex_light_scale: f32,
     pub hud: &'a [HudVertex],
@@ -118,6 +155,10 @@ pub struct Renderer {
     globals_bg: wgpu::BindGroup,
     model_buf: wgpu::Buffer,
     model_bg: wgpu::BindGroup,
+    model_layout: wgpu::BindGroupLayout,
+    model_slots: u32,
+    glow_vbuf: wgpu::Buffer,
+    glow_capacity: u64,
     tex_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     pipe_opaque: wgpu::RenderPipeline,
@@ -133,8 +174,7 @@ pub struct Renderer {
     white: wgpu::BindGroup,
     sections: Vec<GpuMesh>,
     sky: Vec<GpuMesh>,
-    car_body: Option<GpuMesh>,
-    car_wheel: Option<GpuMesh>,
+    car_models: Vec<CarGpu>,
     targets: Option<Targets>,
     pub stats_draws: u32,
 }
@@ -212,23 +252,14 @@ impl Renderer {
             layout: &globals_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() }],
         });
-        let model_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("models"),
-            size: SLOT_STRIDE * SLOTS as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        let model_slots = WORLD_SLOTS + CAR_SLOTS * 8;
+        let (model_buf, model_bg) = create_model_buffer(device, &model_layout, model_slots);
+        let glow_capacity = 64 * 1024;
+        let glow_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("glows"),
+            size: glow_capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        });
-        let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("models"),
-            layout: &model_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &model_buf,
-                    offset: 0,
-                    size: NonZeroU64::new(std::mem::size_of::<ModelUniform>() as u64),
-                }),
-            }],
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -387,6 +418,10 @@ impl Renderer {
             globals_bg,
             model_buf,
             model_bg,
+            model_layout,
+            model_slots,
+            glow_vbuf,
+            glow_capacity,
             tex_layout,
             sampler,
             pipe_opaque,
@@ -402,14 +437,16 @@ impl Renderer {
             white,
             sections: Vec::new(),
             sky: Vec::new(),
-            car_body: None,
-            car_wheel: None,
+            car_models: Vec::new(),
             targets: None,
             stats_draws: 0,
         }
     }
 
     pub fn upload_texture(&mut self, gpu: &Gpu, t: &PreparedTexture) {
+        if self.textures.contains_key(&t.hash) {
+            return;
+        }
         if let Some(bg) = create_texture_bg(gpu, &self.tex_layout, &self.sampler, t) {
             self.textures.insert(t.hash, bg);
         }
@@ -450,9 +487,13 @@ impl Renderer {
         self.sections.len()
     }
 
-    pub fn set_car(&mut self, gpu: &Gpu, body: &MeshData, wheel: Option<&MeshData>) {
-        self.car_body = Self::upload_mesh(gpu, body);
-        self.car_wheel = wheel.and_then(|w| Self::upload_mesh(gpu, w));
+    /// Uploads a car model; [`CarDraw::model`] refers to the returned index.
+    pub fn add_car_model(&mut self, gpu: &Gpu, car: &CarModel) -> Option<usize> {
+        let body = Self::upload_mesh(gpu, &car.body)?;
+        let wheel = car.wheel.as_ref().and_then(|w| Self::upload_mesh(gpu, w));
+        let shadow = car.shadow.as_ref().and_then(|s| Self::upload_mesh(gpu, s));
+        self.car_models.push(CarGpu { body, wheel, shadow });
+        Some(self.car_models.len() - 1)
     }
 
     fn ensure_targets(&mut self, gpu: &Gpu, width: u32, height: u32) {
@@ -478,7 +519,7 @@ impl Renderer {
         self.targets = Some(Targets { width, height, depth, msaa });
     }
 
-    fn write_uniforms(&self, gpu: &Gpu, f: &FrameData, aspect: f32) -> Mat4 {
+    fn write_uniforms(&mut self, gpu: &Gpu, f: &FrameData, aspect: f32) -> Mat4 {
         let proj = Mat4::perspective_rh(f.fov_y, aspect, 0.3, 4000.0);
         let view_proj = proj * f.view;
         let light = Vec3::new(0.35, -0.45, 0.82).normalize();
@@ -493,28 +534,49 @@ impl Renderer {
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 
         let vs = f.vertex_light_scale;
-        let slot = |model: Mat4, tint: [f32; 4], params: [f32; 4]| ModelUniform {
+        let slot = |model: Mat4, tint: [f32; 4], params: [f32; 4], emissive: [f32; 4]| ModelUniform {
             model: model.to_cols_array_2d(),
             tint,
             params,
+            emissive,
         };
         let one = [1.0, 1.0, 1.0, 1.0];
-        let mut slots = vec![slot(Mat4::IDENTITY, one, [0.0; 4]); SLOTS];
-        slots[SLOT_WORLD as usize] = slot(Mat4::IDENTITY, one, [0.0, 0.0, 1.0, vs]);
-        slots[SLOT_WORLD_CUTOUT as usize] = slot(Mat4::IDENTITY, one, [0.0, 0.5, 1.0, vs]);
-        slots[SLOT_WORLD_BLEND as usize] = slot(Mat4::IDENTITY, one, [0.0, 0.01, 1.0, vs]);
+        let none = [0.0; 4];
+        let mut slots = Vec::with_capacity((WORLD_SLOTS + CAR_SLOTS * f.cars.len() as u32) as usize);
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.0, 1.0, vs], none));
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.5, 1.0, vs], none));
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.01, 1.0, vs], none));
         // The dome (centred on the origin by the loader) follows the camera, shrunk so it
         // stays inside the far plane; it is drawn first without depth, so only direction matters.
         let sky_m = Mat4::from_translation(f.cam_pos - Vec3::Z * 60.0) * Mat4::from_scale(Vec3::splat(0.3));
-        slots[SLOT_SKY as usize] = slot(sky_m, one, [0.0, 0.0, 0.0, vs]);
-        let car = f.car.unwrap_or(Mat4::IDENTITY);
-        slots[SLOT_CAR as usize] = slot(car, one, [1.0, 0.5, 1.0, 1.0]);
-        let p = f.paint;
-        slots[SLOT_CAR_PAINT as usize] = slot(car, [p[0], p[1], p[2], 1.0], [1.0, 0.5, 1.0, 1.0]);
-        for (i, w) in f.wheels.iter().enumerate() {
-            slots[SLOT_WHEEL0 as usize + i] = slot(*w, one, [1.0, 0.5, 1.0, 1.0]);
+        slots.push(slot(sky_m, one, [MODE_WORLD, 0.0, 0.0, vs], none));
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.0, 1.0, 1.0], none));
+        for c in f.cars {
+            let t = c.transform;
+            let p = c.paint;
+            let lit = [MODE_CAR, 0.5, 1.0, 1.0];
+            slots.push(slot(t, one, lit, none));
+            slots.push(slot(t, [p[0], p[1], p[2], 1.0], lit, none));
+            slots.push(slot(t, one, [MODE_GLASS, 0.0, 1.0, 1.0], none));
+            // Headlights are always on (the city is at night); brake lights glow dimly as
+            // tail lights and fully when braking.
+            slots.push(slot(t, one, lit, [1.3, 1.3, 1.2, 0.0]));
+            let b = 0.6 + 2.4 * c.brake.clamp(0.0, 1.0);
+            slots.push(slot(t, one, lit, [b, b * 0.5, b * 0.5, 0.0]));
+            slots.push(slot(t, [1.0, 1.0, 1.0, 0.85], [MODE_UNLIT, 0.0, 1.0, 1.0], none));
+            for w in &c.wheels {
+                slots.push(slot(*w, one, lit, none));
+            }
+            // emissive.w flags "blend paint and texture by the texture's alpha".
+            slots.push(slot(t, [p[0], p[1], p[2], 1.0], lit, [0.0, 0.0, 0.0, 1.0]));
         }
-        let mut bytes = vec![0u8; SLOT_STRIDE as usize * SLOTS];
+        if slots.len() as u32 > self.model_slots {
+            self.model_slots = (slots.len() as u32).next_power_of_two();
+            let (buf, bg) = create_model_buffer(&gpu.device, &self.model_layout, self.model_slots);
+            self.model_buf = buf;
+            self.model_bg = bg;
+        }
+        let mut bytes = vec![0u8; SLOT_STRIDE as usize * slots.len()];
         for (i, s) in slots.iter().enumerate() {
             let o = i * SLOT_STRIDE as usize;
             bytes[o..o + std::mem::size_of::<ModelUniform>()].copy_from_slice(bytemuck::bytes_of(s));
@@ -541,6 +603,19 @@ impl Renderer {
         }
         if !hud_bytes.is_empty() {
             gpu.queue.write_buffer(&self.hud_vbuf, 0, hud_bytes);
+        }
+        let glow_bytes: &[u8] = bytemuck::cast_slice(f.glows);
+        if glow_bytes.len() as u64 > self.glow_capacity {
+            self.glow_capacity = (glow_bytes.len() as u64).next_power_of_two();
+            self.glow_vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("glows"),
+                size: self.glow_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !glow_bytes.is_empty() {
+            gpu.queue.write_buffer(&self.glow_vbuf, 0, glow_bytes);
         }
 
         let planes = frustum_planes(&view_proj);
@@ -585,7 +660,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipe_sky);
             for m in &self.sky {
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend != Blend::Additive).then_some(SLOT_SKY)
+                    (r.blend != Blend::Additive).then_some((SLOT_SKY, r.texture))
                 });
             }
 
@@ -594,23 +669,28 @@ impl Renderer {
             for &i in &visible {
                 let m = &self.sections[i];
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| match r.blend {
-                    Blend::Opaque => Some(SLOT_WORLD),
-                    Blend::Cutout => Some(SLOT_WORLD_CUTOUT),
+                    Blend::Opaque => Some((SLOT_WORLD, r.texture)),
+                    Blend::Cutout => Some((SLOT_WORLD_CUTOUT, r.texture)),
                     Blend::Blend | Blend::Additive => None,
                 });
             }
-            // Car body and wheels.
-            if f.car.is_some() {
-                if let Some(m) = &self.car_body {
-                    draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                        matches!(r.blend, Blend::Opaque | Blend::Cutout)
-                            .then_some(if r.texture == PAINT { SLOT_CAR_PAINT } else { SLOT_CAR })
-                    });
-                }
-                if let Some(m) = &self.car_wheel {
+            // Cars: bodies and wheels.
+            let cars: Vec<(u32, &CarDraw, &CarGpu)> = f
+                .cars
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| Some((WORLD_SLOTS + i as u32 * CAR_SLOTS, c, self.car_models.get(c.model)?)))
+                .filter(|(_, c, _)| c.transform.w_axis.truncate().distance(f.cam_pos) < f.draw_distance)
+                .collect();
+            for &(base, c, g) in &cars {
+                let solid = |r: &DrawRange| matches!(r.blend, Blend::Opaque | Blend::Cutout);
+                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                    solid(r).then(|| car_slot(base, c, r))
+                });
+                if let Some(m) = &g.wheel {
                     for w in 0..4 {
                         draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                            matches!(r.blend, Blend::Opaque | Blend::Cutout).then_some(SLOT_WHEEL0 + w)
+                            solid(r).then_some((base + CAR_WHEEL0 + w, r.texture))
                         });
                     }
                 }
@@ -627,23 +707,42 @@ impl Renderer {
             for &i in &order {
                 let m = &self.sections[i];
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend == Blend::Blend).then_some(SLOT_WORLD_BLEND)
+                    (r.blend == Blend::Blend).then_some((SLOT_WORLD_BLEND, r.texture))
                 });
             }
-            if f.car.is_some() {
-                if let Some(m) = &self.car_body {
+            // Car shadows, then glass, far to near.
+            let mut far_first = cars.clone();
+            far_first.sort_by(|a, b| {
+                let da = a.1.transform.w_axis.truncate().distance_squared(f.cam_pos);
+                let db = b.1.transform.w_axis.truncate().distance_squared(f.cam_pos);
+                db.total_cmp(&da)
+            });
+            for &(base, _, g) in &far_first {
+                if let Some(m) = &g.shadow {
                     draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                        (r.blend == Blend::Blend).then_some(if r.texture == PAINT { SLOT_CAR_PAINT } else { SLOT_CAR })
+                        Some((base + CAR_SHADOW, r.texture))
                     });
                 }
+            }
+            for &(base, c, g) in &far_first {
+                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Blend).then(|| car_slot(base, c, r))
+                });
             }
             // Glows last: order does not matter for additive blending.
             pass.set_pipeline(&self.pipe_add);
             for &i in &visible {
                 let m = &self.sections[i];
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend == Blend::Additive).then_some(SLOT_WORLD_BLEND)
+                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_BLEND, r.texture))
                 });
+            }
+            if !f.glows.is_empty() {
+                pass.set_bind_group(2, &self.model_bg, &[SLOT_GLOW * SLOT_STRIDE as u32]);
+                pass.set_bind_group(1, self.textures.get(&f.glow_texture).unwrap_or(&self.white), &[]);
+                pass.set_vertex_buffer(0, self.glow_vbuf.slice(..glow_bytes.len() as u64));
+                pass.draw(0..f.glows.len() as u32, 0..1);
+                draws += 1;
             }
 
             if !f.hud.is_empty() {
@@ -707,19 +806,56 @@ fn create_texture_bg(
     }))
 }
 
+/// Uniform slot and texture for a car body range.
+fn car_slot(base: u32, c: &CarDraw, r: &DrawRange) -> (u32, u32) {
+    match r.role {
+        Role::Paint => (base + CAR_PAINT, PAINT),
+        Role::PaintDetail => (base + CAR_PAINT_DETAIL, r.texture),
+        Role::Skin => (base + CAR_BODY, c.skin.unwrap_or(r.texture)),
+        Role::Glass => (base + CAR_GLASS, r.texture),
+        Role::Headlight => (base + CAR_HEAD, r.texture),
+        Role::Brakelight => (base + CAR_BRAKE, r.texture),
+        Role::Shadow => (base + CAR_SHADOW, r.texture),
+        Role::Normal => (base + CAR_BODY, r.texture),
+    }
+}
+
+fn create_model_buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, slots: u32) -> (wgpu::Buffer, wgpu::BindGroup) {
+    let buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("models"),
+        size: SLOT_STRIDE * slots as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("models"),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &buf,
+                offset: 0,
+                size: NonZeroU64::new(std::mem::size_of::<ModelUniform>() as u64),
+            }),
+        }],
+    });
+    (buf, bg)
+}
+
+/// Draws the ranges `slot_for` selects, returning `(uniform slot, texture hash)`.
 fn draw_ranges(
     pass: &mut wgpu::RenderPass<'_>,
     m: &GpuMesh,
     textures: &HashMap<u32, wgpu::BindGroup>,
     white: &wgpu::BindGroup,
     model_bg: &wgpu::BindGroup,
-    slot_for: impl Fn(&DrawRange) -> Option<u32>,
+    slot_for: impl Fn(&DrawRange) -> Option<(u32, u32)>,
 ) -> u32 {
     let mut bound = false;
     let mut current_slot = u32::MAX;
     let mut n = 0;
     for r in &m.ranges {
-        let Some(slot) = slot_for(r) else { continue };
+        let Some((slot, texture)) = slot_for(r) else { continue };
         if !bound {
             pass.set_vertex_buffer(0, m.vbuf.slice(..));
             pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
@@ -729,7 +865,7 @@ fn draw_ranges(
             pass.set_bind_group(2, model_bg, &[slot * SLOT_STRIDE as u32]);
             current_slot = slot;
         }
-        let tex = if r.texture == PAINT { white } else { textures.get(&r.texture).unwrap_or(white) };
+        let tex = if texture == PAINT { white } else { textures.get(&texture).unwrap_or(white) };
         pass.set_bind_group(1, tex, &[]);
         pass.draw_indexed(r.first_index..r.first_index + r.index_count, 0, 0..1);
         n += 1;

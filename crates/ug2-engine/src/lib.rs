@@ -3,29 +3,35 @@
 
 pub mod assets;
 pub mod camera;
+pub mod cars;
 pub mod collision;
 pub mod config;
 pub mod font;
 pub mod hud;
 pub mod input;
+pub mod menu;
 pub mod render;
 pub mod vehicle;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{vec2, Mat4, Quat, Vec3};
+use ug2_formats::bin_hash;
 use ug2_formats::carinfo::WheelInfo;
 use ug2_formats::fs::GameDir;
 
-use crate::assets::{spawn_loader, LoadEvent, LoaderConfig};
+use crate::assets::{spawn_loader, GpuVertex, LoadEvent, LoadRequest, Loader, LoaderConfig};
 use crate::camera::ChaseCamera;
+use crate::cars::{display_name, CarModel};
 use crate::collision::CollisionWorld;
-use crate::config::GameConfig;
+use crate::config::{GameConfig, SteerMode};
 use crate::hud::{Canvas, Hud, Telemetry};
 use crate::input::{Action, Controls, InputMap, InputState, RawInput, TouchPhase};
-use crate::render::{FrameData, Gpu, Renderer};
+use crate::menu::{Menu, MenuHit, MenuItem};
+use crate::render::{CarDraw, FrameData, Gpu, Renderer};
 use crate::vehicle::Vehicle;
 
 pub use wgpu;
@@ -37,23 +43,74 @@ enum Status {
     MissingData(PathBuf),
 }
 
+/// A car model on the GPU and what physics and effects need from it.
+struct ModelInfo {
+    id: usize,
+    wheels: [WheelInfo; 4],
+    headlights: Vec<Vec3>,
+    brakelights: Vec<Vec3>,
+    /// Front of the body (car-space X), for the headlight pool on the road.
+    front: f32,
+    ride_height: f32,
+    wheelbase: f32,
+}
+
+impl ModelInfo {
+    fn new(id: usize, m: &CarModel) -> Self {
+        Self {
+            id,
+            wheels: m.wheels,
+            headlights: m.headlights.clone(),
+            brakelights: m.brakelights.clone(),
+            front: m.bbox_max.x,
+            ride_height: m.ride_height(),
+            wheelbase: m.wheelbase(),
+        }
+    }
+}
+
+/// Paint colours offered in the pause menu.
+const PAINTS: &[(&str, [f32; 3])] = &[
+    ("ORANGE", [0.85, 0.32, 0.05]),
+    ("RED", [0.72, 0.04, 0.04]),
+    ("YELLOW", [0.92, 0.72, 0.05]),
+    ("LIME", [0.45, 0.85, 0.08]),
+    ("GREEN", [0.05, 0.45, 0.15]),
+    ("CYAN", [0.05, 0.65, 0.80]),
+    ("BLUE", [0.05, 0.18, 0.70]),
+    ("PURPLE", [0.38, 0.08, 0.62]),
+    ("PINK", [0.90, 0.25, 0.55]),
+    ("WHITE", [0.85, 0.86, 0.88]),
+    ("SILVER", [0.55, 0.57, 0.60]),
+    ("GUNMETAL", [0.22, 0.24, 0.27]),
+    ("BLACK", [0.03, 0.03, 0.035]),
+];
+
 pub struct Game {
     pub gpu: Gpu,
     surface: Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)>,
     renderer: Renderer,
     pub cfg: GameConfig,
-    loader: Option<Receiver<LoadEvent>>,
+    config_path: PathBuf,
+    loader: Option<Loader>,
+    world_loading: bool,
     status: Status,
     world: Option<CollisionWorld>,
     vehicle: Vehicle,
-    wheels: [WheelInfo; 4],
-    car_ready: bool,
+    models: HashMap<String, ModelInfo>,
+    racers: Vec<String>,
+    /// Model the player drives (key into `models`) and the one being loaded.
+    player_car: Option<String>,
+    pending_car: Option<String>,
     spawned: bool,
     camera: ChaseCamera,
     input: InputState,
     hud: Hud,
     canvas: Canvas,
     paused: bool,
+    pause_menu: Menu,
+    glows: Vec<GpuVertex>,
+    brake_light: f32,
     last: Instant,
     acc: f32,
     fps: f32,
@@ -70,7 +127,8 @@ impl Game {
     /// `data_dir` holds the original game files; settings live in `config_dir`.
     pub fn new(gpu: Gpu, format: wgpu::TextureFormat, data_dir: &Path, config_dir: &Path, dp: f32) -> Self {
         let _ = std::fs::create_dir_all(config_dir);
-        let cfg = GameConfig::load_or_create(&config_dir.join("ug2.cfg"));
+        let config_path = config_dir.join("ug2.cfg");
+        let cfg = GameConfig::load_or_create(&config_path);
         let input = InputState::new(InputMap::load_or_create(&config_dir.join("controls.cfg")));
         let renderer = Renderer::new(&gpu, format, cfg.msaa);
         log::info!("renderer: {:?}, MSAA x{}", format, renderer.sample_count);
@@ -83,23 +141,29 @@ impl Game {
             (Status::MissingData(data_dir.to_path_buf()), None)
         };
         let hud = Hud::new(cfg.steer_mode, cfg.hud_opacity);
-        let wheels = [WheelInfo::default(); 4];
         Self {
             gpu,
             surface: None,
             renderer,
+            config_path,
+            world_loading: loader.is_some(),
             loader,
             status,
             world: None,
             vehicle: Vehicle::new(Vec3::ZERO, 0.0, 0.16, 2.6),
-            wheels,
-            car_ready: false,
+            models: HashMap::new(),
+            racers: Vec::new(),
+            player_car: None,
+            pending_car: Some(cfg.car.clone()),
             spawned: false,
             camera: ChaseCamera::new(),
             input,
             hud,
             canvas: Canvas::default(),
             paused: false,
+            pause_menu: Menu::new("PAUSED", Vec::new()),
+            glows: Vec::new(),
+            brake_light: 0.0,
             last: Instant::now(),
             acc: 0.0,
             fps: 60.0,
@@ -148,14 +212,88 @@ impl Game {
 
     pub fn handle_input(&mut self, ev: RawInput) {
         if let RawInput::Touch { id, phase, x, y } = ev {
-            if self.paused && phase == TouchPhase::Down {
-                self.paused = false;
+            if self.paused {
+                if phase == TouchPhase::Down {
+                    if let Some(hit) = self.pause_menu.hit(vec2(x, y)) {
+                        self.pause_action(hit);
+                    }
+                }
                 return;
             }
             self.hud.touch(id, phase, x, y);
         } else {
             self.input.handle(&ev);
         }
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        self.paused = paused;
+        if paused {
+            self.pause_menu.selected = 0;
+        }
+    }
+
+    fn pause_action(&mut self, hit: MenuHit) {
+        let step = |h: MenuHit| match h {
+            MenuHit::Prev(_) => -1,
+            _ => 1,
+        };
+        let (MenuHit::Activate(i) | MenuHit::Prev(i) | MenuHit::Next(i)) = hit;
+        match i {
+            0 => self.set_paused(false),
+            1 if !self.racers.is_empty() => {
+                let current = self.pending_car.as_ref().or(self.player_car.as_ref()).cloned().unwrap_or_default();
+                let at = self.racers.iter().position(|r| *r == current).unwrap_or(0) as i32;
+                let next = self.racers[(at + step(hit)).rem_euclid(self.racers.len() as i32) as usize].clone();
+                self.cfg.car = next.clone();
+                self.cfg.save(&self.config_path);
+                self.select_car(next);
+            }
+            2 => {
+                let at = PAINTS.iter().position(|(_, c)| *c == self.cfg.paint).unwrap_or(0) as i32;
+                self.cfg.paint = PAINTS[(at + step(hit)).rem_euclid(PAINTS.len() as i32) as usize].1;
+                self.cfg.save(&self.config_path);
+            }
+            3 => {
+                self.cfg.steer_mode = match self.cfg.steer_mode {
+                    SteerMode::Buttons => SteerMode::Joystick,
+                    SteerMode::Joystick => SteerMode::Buttons,
+                };
+                self.hud.steer_mode = self.cfg.steer_mode;
+                self.hud.layout(self.size.0 as f32, self.size.1 as f32, self.dp);
+                self.cfg.save(&self.config_path);
+            }
+            4 => {
+                self.vehicle.reset_to_safe();
+                self.camera.snap(&self.vehicle);
+                self.set_paused(false);
+            }
+            _ => {}
+        }
+    }
+
+    /// Switches the player's car, loading the model first if needed.
+    fn select_car(&mut self, name: String) {
+        if self.models.contains_key(&name) {
+            self.pending_car = None;
+            self.use_car(&name);
+        } else {
+            if let Some(l) = &self.loader {
+                l.request(LoadRequest::Car(name.clone()));
+            }
+            self.pending_car = Some(name);
+        }
+    }
+
+    fn use_car(&mut self, name: &str) {
+        let Some(m) = self.models.get(name) else { return };
+        self.vehicle.ride_height = m.ride_height;
+        self.vehicle.wheelbase = m.wheelbase;
+        if self.spawned {
+            let (pos, yaw) = (self.vehicle.pos, self.vehicle.yaw);
+            self.vehicle.reset(pos + Vec3::Z * 0.3, yaw);
+        }
+        self.player_car = Some(name.to_string());
     }
 
     fn controls(&self) -> Controls {
@@ -172,15 +310,15 @@ impl Game {
     }
 
     fn pump_loader(&mut self, budget: Duration) {
-        let Some(rx) = &self.loader else { return };
         let start = Instant::now();
-        let mut finished = false;
+        let mut lost = false;
         while start.elapsed() < budget {
-            let ev = match rx.try_recv() {
+            let Some(loader) = &self.loader else { return };
+            let ev = match loader.events.try_recv() {
                 Ok(ev) => ev,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    finished = true;
+                    lost = true;
                     break;
                 }
             };
@@ -195,15 +333,24 @@ impl Game {
                         self.renderer.upload_texture(&self.gpu, t);
                     }
                 }
+                LoadEvent::CarList { racers, traffic } => {
+                    log::info!("{} racers, {} traffic cars", racers.len(), traffic.len());
+                    self.racers = racers;
+                }
                 LoadEvent::Car(car) => {
-                    self.renderer.set_car(&self.gpu, &car.body, car.wheel.as_ref());
-                    self.wheels = car.wheels;
-                    let front = car.wheels.iter().map(|w| w.position[0]).fold(f32::MIN, f32::max);
-                    let rear = car.wheels.iter().map(|w| w.position[0]).fold(f32::MAX, f32::min);
-                    let w0 = car.wheels[0];
-                    self.vehicle.ride_height = w0.radius - w0.position[2];
-                    self.vehicle.wheelbase = (front - rear).max(1.5);
-                    self.car_ready = true;
+                    let name = car.name.clone();
+                    if let Some(id) = self.renderer.add_car_model(&self.gpu, &car) {
+                        self.models.insert(name.clone(), ModelInfo::new(id, &car));
+                    }
+                    if self.pending_car.as_deref() == Some(name.as_str()) {
+                        self.pending_car = None;
+                        self.use_car(&name);
+                    }
+                }
+                LoadEvent::CarFailed(name) => {
+                    if self.pending_car.as_deref() == Some(name.as_str()) {
+                        self.pending_car = None;
+                    }
                 }
                 LoadEvent::Collision(c) => self.world = Some(c),
                 LoadEvent::Spawn { pos, yaw } => {
@@ -221,18 +368,17 @@ impl Game {
                         self.renderer.texture_count()
                     );
                     self.status = Status::Ready;
-                    finished = true;
-                    break;
+                    self.world_loading = false;
                 }
                 LoadEvent::Failed(e) => {
                     self.status = Status::Failed(e);
-                    finished = true;
-                    break;
+                    self.world_loading = false;
                 }
             }
         }
-        if finished {
+        if lost {
             self.loader = None;
+            self.world_loading = false;
         }
     }
 
@@ -253,7 +399,7 @@ impl Game {
                     self.vehicle.reset_to_safe();
                     self.camera.snap(&self.vehicle);
                 }
-                Action::Pause => self.paused = !self.paused,
+                Action::Pause => self.set_paused(!self.paused),
                 _ => {}
             }
         }
@@ -270,8 +416,12 @@ impl Game {
             if steps == 12 {
                 self.acc = 0.0;
             }
-            self.vehicle.advance_wheels(self.wheels[0].radius, dt);
+            let radius = self.player_model().map_or(0.33, |m| m.wheels[0].radius);
+            self.vehicle.advance_wheels(radius, dt);
             self.camera.update(&self.vehicle, controls.look_back, self.world.as_ref(), dt);
+            let braking = controls.brake > 0.05 && self.vehicle.speed() > 0.5;
+            let target = if braking { 1.0 } else { 0.0 };
+            self.brake_light += (target - self.brake_light) * (1.0 - (-25.0 * dt).exp());
             self.debug_timer += dt;
             if self.debug_timer > 1.0 {
                 self.debug_timer = 0.0;
@@ -284,6 +434,10 @@ impl Game {
             }
         }
         self.build_hud();
+    }
+
+    fn player_model(&self) -> Option<&ModelInfo> {
+        self.player_car.as_ref().and_then(|n| self.models.get(n))
     }
 
     fn build_hud(&mut self) {
@@ -316,20 +470,40 @@ impl Game {
             fps: self.fps,
             draw_calls: self.renderer.stats_draws,
         };
-        self.hud.draw(&mut self.canvas, &t, show_touch, self.cfg.show_fps);
+        if !self.paused {
+            self.hud.draw(&mut self.canvas, &t, show_touch, self.cfg.show_fps);
+        }
         if let Status::Loading(s) = &self.status {
             let s = s.clone();
             let size = 1.6 * self.dp;
             self.canvas.text(self.size.0 as f32 * 0.5, 70.0 * self.dp, size, 0.5, &s, [1.0, 1.0, 1.0, 0.6]);
         }
+        if let Some(name) = &self.pending_car {
+            let text = format!("LOADING {}", display_name(name));
+            self.canvas.text(self.size.0 as f32 * 0.5, 90.0 * self.dp, 1.8 * self.dp, 0.5, &text, [1.0, 1.0, 1.0, 0.8]);
+        }
         if self.paused {
-            self.hud.message(&mut self.canvas, &["PAUSED", "TAP TO CONTINUE"]);
+            let car = self.pending_car.as_ref().or(self.player_car.as_ref()).map(|n| display_name(n).to_string());
+            let paint = PAINTS.iter().find(|(_, c)| *c == self.cfg.paint).map_or("CUSTOM", |(n, _)| n);
+            let steer = match self.cfg.steer_mode {
+                SteerMode::Buttons => "BUTTONS",
+                SteerMode::Joystick => "JOYSTICK",
+            };
+            self.pause_menu.items = vec![
+                MenuItem::button("RESUME"),
+                MenuItem::choice("CAR", car.unwrap_or_default()),
+                MenuItem::choice("COLOR", paint),
+                MenuItem::choice("STEERING", steer),
+                MenuItem::button("RESET CAR"),
+            ];
+            let size = vec2(self.size.0 as f32, self.size.1 as f32);
+            self.pause_menu.draw(&mut self.canvas, size, self.dp);
         }
     }
 
-    fn wheel_transforms(&self, car: Mat4) -> [Mat4; 4] {
+    fn wheel_transforms(&self, car: Mat4, wheels: &[WheelInfo; 4]) -> [Mat4; 4] {
         let mut out = [Mat4::IDENTITY; 4];
-        for (i, w) in self.wheels.iter().enumerate() {
+        for (i, w) in wheels.iter().enumerate() {
             let p = Vec3::from(w.position);
             let front = p.x > 0.0;
             let steer = if front { self.vehicle.steer * 0.6 } else { 0.0 };
@@ -345,15 +519,25 @@ impl Game {
 
     /// Renders into `target`. Borrows the HUD canvas and the renderer as disjoint fields.
     fn render_to(&mut self, target: &wgpu::TextureView, width: u32, height: u32) {
-        let car = (self.car_ready && self.spawned).then(|| self.vehicle.transform());
-        let wheels = self.wheel_transforms(car.unwrap_or(Mat4::IDENTITY));
+        let view = self.camera.view();
+        let mut cars = Vec::new();
+        let mut glows = std::mem::take(&mut self.glows);
+        glows.clear();
+        if let (true, Some(m)) = (self.spawned, self.player_model()) {
+            let t = self.vehicle.transform();
+            let wheels = self.wheel_transforms(t, &m.wheels);
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light });
+            let (right, up) = (view.row(0).truncate(), view.row(1).truncate());
+            push_car_glows(&mut glows, m, t, self.brake_light, right, up);
+        }
+        self.glows = glows;
         let data = FrameData {
-            view: self.camera.view(),
+            view,
             fov_y: self.camera.fov_y,
             cam_pos: self.camera.eye,
-            car,
-            wheels,
-            paint: self.cfg.paint,
+            cars: &cars,
+            glows: &self.glows,
+            glow_texture: bin_hash("HEADLIGHTGLOW"),
             draw_distance: self.cfg.draw_distance,
             vertex_light_scale: self.cfg.vertex_light_scale,
             hud: &self.canvas.vertices,
@@ -387,7 +571,7 @@ impl Game {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.loader.is_some()
+        self.world_loading
     }
 
     pub fn status_text(&self) -> String {
@@ -473,5 +657,41 @@ impl Game {
 
     pub fn vehicle_state(&self) -> (Vec3, f32, f32) {
         (self.vehicle.pos, self.vehicle.yaw, self.vehicle.speed())
+    }
+}
+
+/// Camera-facing additive quad.
+fn glow_quad(out: &mut Vec<GpuVertex>, c: Vec3, size: f32, color: [u8; 4], right: Vec3, up: Vec3) {
+    let (r, u) = (right * size, up * size);
+    let v = |p: Vec3, uv: [f32; 2]| GpuVertex { pos: p.into(), normal: [0.0; 3], color, uv };
+    let (a, b, cc, d) = (v(c - r - u, [0.0, 1.0]), v(c + r - u, [1.0, 1.0]), v(c + r + u, [1.0, 0.0]), v(c - r + u, [0.0, 0.0]));
+    out.extend_from_slice(&[a, b, cc, a, cc, d]);
+}
+
+/// Headlight and brake-light glows plus the pool of light the headlights throw on the road.
+fn push_car_glows(out: &mut Vec<GpuVertex>, m: &ModelInfo, t: Mat4, brake: f32, right: Vec3, up: Vec3) {
+    for p in &m.headlights {
+        glow_quad(out, t.transform_point3(*p + Vec3::X * 0.08), 0.75, [255, 244, 225, 210], right, up);
+    }
+    let b = brake.clamp(0.0, 1.0);
+    for p in &m.brakelights {
+        let alpha = (70.0 + 170.0 * b) as u8;
+        glow_quad(out, t.transform_point3(*p - Vec3::X * 0.06), 0.28 + 0.32 * b, [255, 40, 25, alpha], right, up);
+    }
+    // Pool of light: a fan on the ground ahead of the car, bright at the centre. The
+    // glow texture is sampled at its white centre so only the vertex alpha shapes it.
+    let z = -m.ride_height + 0.07;
+    let center = Vec3::new(m.front + 6.0, 0.0, z);
+    let (rx, ry) = (6.5, 3.4);
+    let uv = [0.5, 0.5];
+    let mid = GpuVertex { pos: t.transform_point3(center).into(), normal: [0.0; 3], color: [255, 236, 205, 55], uv };
+    let n = 18;
+    let rim = |i: usize| {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let p = center + Vec3::new(a.cos() * rx, a.sin() * ry, 0.0);
+        GpuVertex { pos: t.transform_point3(p).into(), normal: [0.0; 3], color: [255, 236, 205, 0], uv }
+    };
+    for i in 0..n {
+        out.extend_from_slice(&[mid, rim(i), rim(i + 1)]);
     }
 }

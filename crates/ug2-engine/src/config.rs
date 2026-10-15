@@ -59,6 +59,12 @@ impl GameConfig {
         cfg
     }
 
+    pub fn save(&self, path: &Path) {
+        if let Err(e) = std::fs::write(path, self.to_text()) {
+            log::warn!("cannot write {}: {e}", path.display());
+        }
+    }
+
     pub fn apply(&mut self, text: &str) {
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
