@@ -49,7 +49,15 @@ impl GameConfig {
     pub fn load_or_create(path: &Path) -> Self {
         let mut cfg = Self::default();
         match std::fs::read_to_string(path) {
-            Ok(text) => cfg.apply(&text),
+            Ok(text) => {
+                cfg.apply(&text);
+                // Files written before version 2 defaulted to the joystick; the touch
+                // buttons are the default now.
+                if !text.lines().any(|l| l.trim_start().starts_with("version")) {
+                    cfg.steer_mode = SteerMode::Buttons;
+                    cfg.save(path);
+                }
+            }
             Err(_) => {
                 if let Err(e) = std::fs::write(path, cfg.to_text()) {
                     log::warn!("cannot write {}: {e}", path.display());
@@ -90,6 +98,7 @@ impl GameConfig {
                 "render_scale" => self.render_scale = f().unwrap_or(self.render_scale).clamp(0.3, 1.0),
                 "draw_distance" => self.draw_distance = f().unwrap_or(self.draw_distance).clamp(100.0, 3000.0),
                 "vertex_light_scale" => self.vertex_light_scale = f().unwrap_or(self.vertex_light_scale),
+                "version" => {}
                 _ => log::warn!("unknown setting {k}"),
             }
         }
@@ -98,6 +107,7 @@ impl GameConfig {
     pub fn to_text(&self) -> String {
         format!(
             "# Underground 2 Android settings\n\
+             version = 2\n\
              car = {}\n\
              location = {}\n\
              paint = {}, {}, {}\n\

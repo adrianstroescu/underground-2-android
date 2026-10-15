@@ -13,9 +13,12 @@ pub mod menu;
 pub mod render;
 pub mod vehicle;
 
+pub use ug2_audio::{music, sound};
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glam::{vec2, Mat4, Quat, Vec3};
@@ -31,7 +34,9 @@ use crate::config::{GameConfig, SteerMode};
 use crate::hud::{Canvas, Hud, Telemetry};
 use crate::input::{Action, Controls, InputMap, InputState, RawInput, TouchPhase};
 use crate::menu::{Menu, MenuHit, MenuItem};
+use crate::music::Music;
 use crate::render::{CarDraw, FrameData, Gpu, Renderer};
+use crate::sound::{EngineSound, Sound, SoundState};
 use crate::vehicle::Vehicle;
 
 pub use wgpu;
@@ -111,6 +116,10 @@ pub struct Game {
     pause_menu: Menu,
     glows: Vec<GpuVertex>,
     brake_light: f32,
+    sound: Sound,
+    _music: Option<Music>,
+    engine_sounds: HashMap<String, Arc<EngineSound>>,
+    last_gear: i32,
     last: Instant,
     acc: f32,
     fps: f32,
@@ -141,6 +150,12 @@ impl Game {
             (Status::MissingData(data_dir.to_path_buf()), None)
         };
         let hud = Hud::new(cfg.steer_mode, cfg.hud_opacity);
+        let sound = Sound::default();
+        let music = GameDir::new(data_dir).resolve("pfdata/MusicSFx.mus").map(Music::start);
+        if let Some(m) = &music {
+            let ring = m.ring.clone();
+            sound.with(|mx| mx.set_music(ring));
+        }
         Self {
             gpu,
             surface: None,
@@ -164,6 +179,10 @@ impl Game {
             pause_menu: Menu::new("PAUSED", Vec::new()),
             glows: Vec::new(),
             brake_light: 0.0,
+            sound,
+            _music: music,
+            engine_sounds: HashMap::new(),
+            last_gear: 1,
             last: Instant::now(),
             acc: 0.0,
             fps: 60.0,
@@ -294,6 +313,14 @@ impl Game {
             self.vehicle.reset(pos + Vec3::Z * 0.3, yaw);
         }
         self.player_car = Some(name.to_string());
+        if let Some(e) = self.engine_sounds.get(name).cloned() {
+            self.sound.with(|m| m.set_engine(&e));
+        }
+    }
+
+    /// The mixer the platform's audio callback pulls from.
+    pub fn sound(&self) -> Sound {
+        self.sound.clone()
     }
 
     fn controls(&self) -> Controls {
@@ -352,6 +379,16 @@ impl Game {
                         self.pending_car = None;
                     }
                 }
+                LoadEvent::Effects(fx) => {
+                    self.sound.with(|m| m.set_effects(*fx));
+                }
+                LoadEvent::Engine { car, sound } => {
+                    let sound = Arc::new(*sound);
+                    if self.player_car.as_deref() == Some(car.as_str()) {
+                        self.sound.with(|m| m.set_engine(&sound));
+                    }
+                    self.engine_sounds.insert(car, sound);
+                }
                 LoadEvent::Collision(c) => self.world = Some(c),
                 LoadEvent::Spawn { pos, yaw } => {
                     self.vehicle.reset(pos, yaw);
@@ -405,6 +442,10 @@ impl Game {
         }
 
         let controls = self.controls();
+        if self.paused || !self.spawned {
+            let rpm = self.vehicle.rpm;
+            self.sound.with(|m| m.set_state(SoundState { rpm, ..Default::default() }));
+        }
         if !self.paused && self.spawned {
             self.acc += dt;
             let mut steps = 0;
@@ -419,6 +460,29 @@ impl Game {
             let radius = self.player_model().map_or(0.33, |m| m.wheels[0].radius);
             self.vehicle.advance_wheels(radius, dt);
             self.camera.update(&self.vehicle, controls.look_back, self.world.as_ref(), dt);
+            let v = &mut self.vehicle;
+            let shifted_up = v.gear > self.last_gear && self.last_gear > 0;
+            self.last_gear = v.gear;
+            let impact = std::mem::take(&mut v.impact);
+            let skid = ((v.slip - 2.5) / 6.0).clamp(0.0, 1.0)
+                + if controls.handbrake { (v.speed().abs() / 20.0).min(1.0) * 0.6 } else { 0.0 };
+            let state = SoundState {
+                rpm: v.rpm,
+                throttle: controls.throttle,
+                speed: v.speed().abs(),
+                nitro: controls.nitro && v.nitro > 0.0 && controls.throttle > 0.1,
+                skid: skid.min(1.0),
+                active: true,
+            };
+            self.sound.with(|m| {
+                m.set_state(state);
+                if shifted_up {
+                    m.shift();
+                }
+                if impact > 3.0 {
+                    m.impact(((impact - 3.0) / 15.0).min(1.0));
+                }
+            });
             let braking = controls.brake > 0.05 && self.vehicle.speed() > 0.5;
             let target = if braking { 1.0 } else { 0.0 };
             self.brake_light += (target - self.brake_light) * (1.0 - (-25.0 * dt).exp());
@@ -427,8 +491,9 @@ impl Game {
                 self.debug_timer = 0.0;
                 let v = &self.vehicle;
                 let wall = self.world.as_ref().and_then(|w| w.owners.get(v.last_wall as usize)).cloned().unwrap_or_default();
+                let peak = self.sound.with(|m| std::mem::take(&mut m.peak)).unwrap_or(0.0);
                 log::info!(
-                    "car pos {:.1?} speed {:.1} grounded {} walls {} ({wall}) | thr {:.1} brk {:.1} steer {:.2}",
+                    "car pos {:.1?} speed {:.1} grounded {} walls {} ({wall}) | thr {:.1} brk {:.1} steer {:.2} | audio peak {peak:.2}",
                     v.pos, v.speed() * 3.6, v.grounded, v.wall_hits, controls.throttle, controls.brake, controls.steer
                 );
             }

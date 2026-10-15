@@ -15,7 +15,12 @@ use android_activity::input::{Axis, InputEvent, KeyAction, Keycode, MotionAction
 use android_activity::{AndroidApp, InputStatus, MainEvent, PollEvent, WindowManagerFlags};
 use raw_window_handle::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
 use ug2_engine::input::{PadAxis, PadButton, RawInput, TouchPhase};
+use ndk::audio::{
+    AudioCallbackResult, AudioDirection, AudioFormat, AudioPerformanceMode, AudioSharingMode, AudioStream,
+    AudioStreamBuilder, AudioUsage,
+};
 use ug2_engine::render::Gpu;
+use ug2_engine::sound::{Sound, RATE};
 use ug2_engine::{wgpu, Game};
 
 const SOURCE_TOUCHSCREEN: u32 = 0x0000_1002;
@@ -42,6 +47,7 @@ fn android_main(app: AndroidApp) {
     let mut window = None;
     let mut quit = false;
     let mut focused = true;
+    let mut audio: Option<AudioStream> = None;
 
     while !quit {
         let active = focused && game.as_ref().is_some_and(|g| g.has_surface());
@@ -78,6 +84,7 @@ fn android_main(app: AndroidApp) {
                         let dp = app.config().density().unwrap_or(480) as f32 / 160.0;
                         let mut g = Game::new(gpu, format, &data_dir, &files, dp);
                         g.touch_ui = true;
+                        audio = open_audio(g.sound());
                         game = Some(g);
                     }
                     if let Some(g) = game.as_mut() {
@@ -100,8 +107,18 @@ fn android_main(app: AndroidApp) {
                         g.set_dp(app.config().density().unwrap_or(480) as f32 / 160.0);
                     }
                 }
-                MainEvent::GainedFocus => focused = true,
-                MainEvent::LostFocus => focused = false,
+                MainEvent::GainedFocus => {
+                    focused = true;
+                    if let Some(a) = &audio {
+                        let _ = a.request_start();
+                    }
+                }
+                MainEvent::LostFocus => {
+                    focused = false;
+                    if let Some(a) = &audio {
+                        let _ = a.request_pause();
+                    }
+                }
                 MainEvent::Destroy => quit = true,
                 _ => {}
             }
@@ -125,8 +142,45 @@ fn android_main(app: AndroidApp) {
             }
         }
     }
+    drop(audio);
     drop(window);
     log::info!("exiting");
+}
+
+/// Low-latency AAudio output; the callback pulls stereo f32 frames from the mixer.
+fn open_audio(sound: Sound) -> Option<AudioStream> {
+    let mixer = sound.mixer();
+    let stream = AudioStreamBuilder::new()
+        .and_then(|b| {
+            b.direction(AudioDirection::Output)
+                .channel_count(2)
+                .sample_rate(RATE as i32)
+                .format(AudioFormat::PCM_Float)
+                .performance_mode(AudioPerformanceMode::LowLatency)
+                .sharing_mode(AudioSharingMode::Shared)
+                .usage(AudioUsage::Game)
+                .data_callback(Box::new(move |_stream, data, frames| {
+                    // SAFETY: AAudio hands us `frames` stereo f32 frames to fill.
+                    let out = unsafe { std::slice::from_raw_parts_mut(data as *mut f32, frames.max(0) as usize * 2) };
+                    // A panic must not unwind into AAudio (that aborts the app): play silence.
+                    let ok = mixer.lock().ok().and_then(|mut m| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.render(out))).ok()
+                    });
+                    if ok.is_none() {
+                        out.fill(0.0);
+                    }
+                    AudioCallbackResult::Continue
+                }))
+                .error_callback(Box::new(|_stream, e| log::warn!("audio stream error: {e:?}")))
+                .open_stream()
+        })
+        .map_err(|e| log::error!("audio: {e:?}"))
+        .ok()?;
+    if let Err(e) = stream.request_start() {
+        log::error!("audio start: {e:?}");
+    }
+    log::info!("audio: {} Hz, {} frames per burst", stream.sample_rate(), stream.frames_per_burst());
+    Some(stream)
 }
 
 fn handle_input(game: &mut Game, event: &InputEvent) -> InputStatus {

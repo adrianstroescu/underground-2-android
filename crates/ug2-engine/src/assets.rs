@@ -15,6 +15,7 @@ use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 use ug2_formats::track::{parse_region, parse_streaming_sections};
 
 use crate::cars::{load_car, CarModel, SharedCarData};
+use crate::sound::{Effects, EngineSound};
 use crate::collision::CollisionWorld;
 
 #[repr(C)]
@@ -96,6 +97,8 @@ pub enum LoadEvent {
     CarList { racers: Vec<String>, traffic: Vec<String> },
     Car(Box<CarModel>),
     CarFailed(String),
+    Effects(Box<Effects>),
+    Engine { car: String, sound: Box<EngineSound> },
     Collision(CollisionWorld),
     Spawn { pos: Vec3, yaw: f32 },
     Section(SectionAsset),
@@ -138,6 +141,7 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             let traffic = shared.names(CarUsage::Traffic);
             let _ = tx.send(LoadEvent::CarList { racers, traffic });
             send_car(&game, &shared, &cfg, &cfg.car, &tx);
+            let _ = tx.send(LoadEvent::Effects(Box::new(Effects::load(&game))));
             if let Err(e) = load_world(&game, &cfg, &tx) {
                 log::error!("load failed: {e:#}");
                 let _ = tx.send(LoadEvent::Failed(format!("{e:#}")));
@@ -161,6 +165,9 @@ fn send_car(game: &GameDir, shared: &SharedCarData, cfg: &LoaderConfig, name: &s
             let _ = tx.send(LoadEvent::Textures(prepared));
             log::info!("car {name} loaded in {:.0?}", t0.elapsed());
             let _ = tx.send(LoadEvent::Car(Box::new(car)));
+            if let Some(sound) = EngineSound::load(game, name) {
+                let _ = tx.send(LoadEvent::Engine { car: name.to_string(), sound: Box::new(sound) });
+            }
         }
         Err(e) => {
             log::error!("car {name}: {e:#}");

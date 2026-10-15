@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ug2-formats",
     "crates/ug2-tool",
+    "crates/ug2-audio",
     "crates/ug2-engine",
     "crates/ug2-desktop",
     "crates/ug2-android",
@@ -17,6 +18,7 @@ repository = "https://github.com/adrianstroescu/underground-2-android"
 [workspace.dependencies]
 ug2-formats = { path = "crates/ug2-formats" }
 ug2-engine = { path = "crates/ug2-engine" }
+ug2-audio = { path = "crates/ug2-audio" }
 # Vulkan only: Android target; DX12 also breaks windows-gnu dev builds.
 wgpu = { version = "25", default-features = false, features = ["vulkan", "wgsl"] }
 glam = { version = "0.30", features = ["bytemuck"] }
@@ -26,6 +28,7 @@ anyhow = "1"
 pollster = "0.4"
 png = "0.17"
 raw-window-handle = "0.6"
+symphonia = { version = "0.5", default-features = false, features = ["mp3"] }
 
 [profile.dev]
 opt-level = 1

@@ -13,3 +13,4 @@ bytemuck.workspace = true
 log.workspace = true
 anyhow.workspace = true
 pollster.workspace = true
+ug2-audio.workspace = true

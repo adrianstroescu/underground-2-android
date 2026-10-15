@@ -4,6 +4,7 @@
 //! Ids with the top bit set are containers holding further chunks. This crate only
 //! parses; it never needs the original executable.
 
+pub mod audio;
 pub mod bytes;
 pub mod car;
 pub mod carinfo;

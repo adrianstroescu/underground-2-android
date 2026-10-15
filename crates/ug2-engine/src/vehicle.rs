@@ -24,6 +24,10 @@ pub struct Vehicle {
     pub wheelbase: f32,
     last_safe: (Vec3, f32),
     safe_timer: f32,
+    /// Sideways speed before grip (m/s), for tyre squeal.
+    pub slip: f32,
+    /// Hardest wall impact (m/s into the wall) since the game last read it.
+    pub impact: f32,
     /// Wall contacts in the last step (debug telemetry).
     pub wall_hits: u32,
     pub last_wall: u32,
@@ -57,6 +61,8 @@ impl Vehicle {
             wheelbase,
             last_safe: (pos, yaw),
             safe_timer: 0.0,
+            slip: 0.0,
+            impact: 0.0,
             wall_hits: 0,
             last_wall: 0,
         }
@@ -132,6 +138,7 @@ impl Vehicle {
                 v_long += accel * dt;
             }
 
+            self.slip = v_lat.abs();
             // Lateral grip: kill sideways velocity, much less with the handbrake.
             let grip = if c.handbrake { 1.6 } else { 9.0 };
             v_lat *= (-grip * dt).exp();
@@ -192,6 +199,7 @@ impl Vehicle {
                 self.pos += push.clamp_length_max(1.0);
                 let into = self.vel.dot(n);
                 if into < 0.0 {
+                    self.impact = self.impact.max(-into);
                     // Remove the inward component, bounce a little, scrub speed.
                     self.vel -= n * into * 1.3;
                     self.vel *= 0.92;

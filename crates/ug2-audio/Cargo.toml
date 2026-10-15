@@ -1,0 +1,12 @@
+[package]
+name = "ug2-audio"
+description = "Game audio: software mixer, granular engine sounds, effects, music streaming"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ug2-formats.workspace = true
+log.workspace = true
+anyhow.workspace = true
+symphonia.workspace = true
