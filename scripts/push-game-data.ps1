@@ -16,7 +16,7 @@ if (-not (Test-Path "$GameDir\TRACKS\L4RA.BUN")) { throw "Not a UG2 install: $Ga
 if ($LASTEXITCODE -ne 0) { throw "No device: connect the phone with USB debugging enabled" }
 
 # Launching once makes Android create the app's data folder with the right owner.
-& adb shell am start -n "$package/android.app.NativeActivity" | Out-Null
+& adb shell am start -n "$package/.MainActivity" | Out-Null
 Start-Sleep -Seconds 2
 & adb shell mkdir -p "$dest/CARS/$Car" "$dest/GLOBAL" "$dest/TRACKS"
 
@@ -25,12 +25,14 @@ function Push($rel) {
     if (-not (Test-Path $src)) { Write-Warning "missing $rel"; return }
     $target = "$dest/" + ($rel -replace '\\', '/')
     Write-Host "-> $rel"
-    if ((Get-Item $src).PSIsContainer) {
-        & adb push $src (Split-Path $target -Parent).Replace('\', '/') | Select-Object -Last 1
-    } else {
+    if ((Get-Item $src).PSIsContainer) { $target = (Split-Path $target -Parent).Replace('\', '/') }
+    # Large pushes over USB occasionally abort mid-transfer ("write failed"); retry.
+    foreach ($try in 1..3) {
         & adb push $src $target | Select-Object -Last 1
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warning "push failed, retry $try"
     }
-    if ($LASTEXITCODE -ne 0) { throw "adb push failed for $rel" }
+    throw "adb push failed for $rel"
 }
 
 if ($Full) {
@@ -46,7 +48,7 @@ if ($Full) {
     Push "TRACKS\LOC4DYNTEX.BIN"
 }
 # Folders created by adb belong to the shell user (mode 2770); open them up so the
-# app's own user can read them.
-& adb shell chmod -R a+rwX $dest
+# app's own user can read them. NFSU2 itself belongs to the app and can't be chmod-ed.
+& adb shell "chmod -R a+rwX $dest/*"
 & adb shell am force-stop $package
 Write-Host "Done. Start 'NFS Underground 2' on the phone."

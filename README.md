@@ -2,7 +2,7 @@
 
 Reimplementare nativă în Rust a motorului **Need for Speed: Underground 2** (PC, 2004), țintă principală Android (Samsung Galaxy S23 Ultra, Vulkan).
 
-Nu emulăm nimic: nu rulăm `speed2.exe`, nu folosim Wine/Box64/x86. Motorul citește direct fișierele de date ale jocului (piste, mașini, texturi) și le randează cu propriul renderer (wgpu → Vulkan). APK-ul nu conține cod Java (NativeActivity).
+Nu emulăm nimic: nu rulăm `speed2.exe`, nu folosim Wine/Box64/x86. Motorul citește direct fișierele de date ale jocului (piste, mașini, texturi) și le randează cu propriul renderer (wgpu → Vulkan). Tot jocul e în `libug2.so`; singurul cod Java e o clasă mică (`MainActivity extends NativeActivity`) care ascunde barele de sistem.
 
 > **Fișierele jocului NU sunt incluse și nu vor fi incluse în acest repo.** Ai nevoie de propria copie a jocului; fișierele se copiază pe telefon separat (vezi mai jos).
 
@@ -11,9 +11,10 @@ Nu emulăm nimic: nu rulăm `speed2.exe`, nu folosim Wine/Box64/x86. Motorul cit
 - Orașul Bayview complet, încărcat din `TRACKS/STREAML4RA.BUN`: 583 de secțiuni, ~900k triunghiuri, ~1.900 de texturi, cer cu nori, neoane (blending aditiv), garduri și vegetație (alpha).
 - Nissan 350Z stoc, cu roți poziționate din `CarTypeInfo` (GLOBALB), vopsea configurabilă.
 - Condus: fizică arcade (accelerație, frână, mers înapoi, frână de mână cu drift, nitro, cutie automată cu 6 trepte), urmărirea terenului, coliziune cu clădiri, ziduri și parapeți.
-- HUD tactil multi-touch: joystick virtual pentru direcție (sau butoane ←/→), GAS, BRAKE, NOS, E-BRAKE, LOOK (privire înapoi), CAM, RESET, pauză; vitezometru, treaptă, turație, nitro, FPS.
+- HUD tactil multi-touch: butoane « » pentru direcție (sau joystick virtual), GAS, BRAKE, NOS, E-BRAKE, LOOK (privire înapoi), CAM, RESET, pauză; vitezometru, treaptă, turație, nitro, FPS.
 - Gamepad (Bluetooth/USB) și tastatură, cu mapare editabilă în `controls.cfg`.
-- Testat în emulatorul Android (x86_64, Vulkan): 40–50 FPS la ~2.000 de draw call-uri pe un GPU Intel integrat.
+- Testat pe Galaxy S23 Ultra (Adreno 740, Android 16): **~120 FPS** la ~1.800 de draw call-uri, orașul se încarcă în ~1 s.
+- Testat și în emulatorul Android (x86_64, Vulkan): 40–50 FPS pe un GPU Intel integrat.
 
 ## Instalare pe telefon (S23 Ultra)
 
@@ -38,7 +39,7 @@ Fișierele ajung în `/sdcard/Android/data/com.adrianstroescu.ug2/files/NFSU2/` 
 
 | Acțiune | Touch | Gamepad | Tastatură |
 |---|---|---|---|
-| Direcție | joystick stânga | stick stânga / D-pad | ← → / A D |
+| Direcție | butoanele « » (sau joystick, din `ug2.cfg`) | stick stânga / D-pad | ← → / A D |
 | Accelerație | GAS | R2 / R1 | ↑ / W |
 | Frână / înapoi | BRAKE | L2 / L1 | ↓ / S |
 | Frână de mână | E-BRAKE | X | Space |
@@ -52,7 +53,7 @@ Degetul poate aluneca între GAS, BRAKE, NOS și E-BRAKE fără să fie ridicat 
 
 ## Setări (`ug2.cfg`)
 
-`car` (ex. `350Z`, `SKYLINE`, `RX7`), `paint = r, g, b`, `steer_mode = joystick | buttons`, `hud_scale`, `hud_opacity`, `msaa = 1 | 4`, `draw_distance`, `show_fps`.
+`car` (ex. `350Z`, `SKYLINE`, `RX7`), `paint = r, g, b`, `steer_mode = buttons | joystick` (implicit butoane « », ca în jocurile de curse de mobil), `hud_scale`, `hud_opacity`, `msaa = 1 | 4`, `draw_distance`, `show_fps`.
 
 ## Structură
 
@@ -63,7 +64,7 @@ crates/
   ug2-android   NativeActivity: suprafață Vulkan, touch, gamepad, ciclul de viață al aplicației
   ug2-desktop   gazdă Windows/Linux pentru dezvoltare (fereastră, mouse ca touch, screenshot headless)
   ug2-tool      CLI de inspectare/export (OBJ + PNG) pentru validarea parserelor
-android/        AndroidManifest.xml
+android/        AndroidManifest.xml, MainActivity.java (ecran complet imersiv)
 scripts/        build-apk.ps1, push-game-data.ps1
 ```
 

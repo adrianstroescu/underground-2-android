@@ -1,6 +1,6 @@
 [package]
 name = "ug2-android"
-description = "Android entry point (NativeActivity, no Java)"
+description = "Android entry point (NativeActivity)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

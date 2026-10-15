@@ -33,7 +33,7 @@ impl Default for GameConfig {
             car: "350Z".into(),
             location: "L4RA".into(),
             paint: [0.85, 0.32, 0.05],
-            steer_mode: SteerMode::Joystick,
+            steer_mode: SteerMode::Buttons,
             hud_scale: 1.0,
             hud_opacity: 0.55,
             show_fps: true,
@@ -75,7 +75,7 @@ impl GameConfig {
                     }
                 }
                 "steer_mode" => {
-                    self.steer_mode = if v.eq_ignore_ascii_case("buttons") { SteerMode::Buttons } else { SteerMode::Joystick }
+                    self.steer_mode = if v.eq_ignore_ascii_case("joystick") { SteerMode::Joystick } else { SteerMode::Buttons }
                 }
                 "hud_scale" => self.hud_scale = f().unwrap_or(self.hud_scale).clamp(0.5, 2.0),
                 "hud_opacity" => self.hud_opacity = f().unwrap_or(self.hud_opacity).clamp(0.1, 1.0),
@@ -95,7 +95,7 @@ impl GameConfig {
              car = {}\n\
              location = {}\n\
              paint = {}, {}, {}\n\
-             steer_mode = {}   # joystick | buttons\n\
+             steer_mode = {}   # buttons | joystick\n\
              hud_scale = {}\n\
              hud_opacity = {}\n\
              show_fps = {}\n\

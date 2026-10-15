@@ -1,4 +1,5 @@
-//! Android entry point: a NativeActivity driven from Rust (no Java code in the APK).
+//! Android entry point: a NativeActivity driven from Rust. The APK's only Java code is
+//! `MainActivity` (android/java), which hides the system bars.
 //!
 //! Game files are read from the app's external files directory:
 //! `/sdcard/Android/data/com.adrianstroescu.ug2/files/NFSU2/` (CARS, GLOBAL, TRACKS, ...).

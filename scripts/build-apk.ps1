@@ -1,4 +1,4 @@
-# Builds build/ug2.apk without Gradle: cargo -> aapt2 -> zipalign -> apksigner.
+# Builds build/ug2.apk without Gradle: cargo -> javac/d8 -> aapt2 -> zipalign -> apksigner.
 #   powershell -ExecutionPolicy Bypass -File scripts\build-apk.ps1 [-Install] [-Run] [-DebugBuild] [-Emulator]
 # -Emulator also packs an x86_64 library so the same APK runs in the Android emulator.
 param(
@@ -65,6 +65,17 @@ foreach ($a in $abis) {
     if ($LASTEXITCODE -ne 0) { throw "strip failed" }
 }
 
+# MainActivity.java: a NativeActivity subclass whose only job is immersive full screen.
+$jdk = if ($env:JAVA_HOME) { "$env:JAVA_HOME\bin" } else { Split-Path (Get-Command javac.exe).Source }
+$classes = "$stage\classes"
+New-Item -ItemType Directory -Force $classes | Out-Null
+$sources = @(Get-ChildItem "$root\android\java" -Recurse -Filter *.java | ForEach-Object FullName)
+& "$jdk\javac.exe" --release 11 -nowarn -cp "$platform\android.jar" -d $classes @sources
+if ($LASTEXITCODE -ne 0) { throw "javac failed" }
+$classFiles = @(Get-ChildItem $classes -Recurse -Filter *.class | ForEach-Object FullName)
+& "$buildTools\d8.bat" --release --min-api $minSdk --lib "$platform\android.jar" --output $stage @classFiles
+if ($LASTEXITCODE -ne 0) { throw "d8 failed" }
+
 $unsigned = "$out\ug2-unsigned.apk"
 $aligned = "$out\ug2-aligned.apk"
 $apk = "$out\ug2.apk"
@@ -76,6 +87,7 @@ if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
 Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $zip = [System.IO.Compression.ZipFile]::Open($unsigned, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, "$stage\classes.dex", "classes.dex", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
     foreach ($a in $abis) {
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, "$stage\lib\$($a.abi)\libug2.so", "lib/$($a.abi)/libug2.so", [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
     }
@@ -102,6 +114,6 @@ if ($Install -or $Run) {
     if ($LASTEXITCODE -ne 0) { throw "adb install failed" }
 }
 if ($Run) {
-    & adb shell am start -n "$package/android.app.NativeActivity"
+    & adb shell am start -n "$package/.MainActivity"
     Write-Host "Logs: adb logcat -s ug2:* RustStdoutStderr:*"
 }

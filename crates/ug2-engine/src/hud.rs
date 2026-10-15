@@ -74,6 +74,22 @@ impl Canvas {
         self.tri(a, b, c, col);
     }
 
+    /// Double chevron (« or ») centred on `c`; `dir` is -1 for left, +1 for right.
+    /// Each chevron is two parallelograms sharing an edge, so translucent colours don't
+    /// double up where the arms meet.
+    pub fn chevrons(&mut self, c: Vec2, size: f32, dir: f32, thickness: f32, col: Rgba) {
+        let t = vec2(thickness * dir, 0.0);
+        let h = vec2(0.0, 0.5 * size);
+        for off in [-0.22, 0.22] {
+            let tip = c + vec2((off + 0.25 - thickness / size * 0.5) * size * dir, 0.0);
+            let back = tip - vec2(0.5 * size * dir, 0.0);
+            self.tri(back - h, back - h + t, tip + t, col);
+            self.tri(back - h, tip + t, tip, col);
+            self.tri(tip, tip + t, back + h + t, col);
+            self.tri(tip, back + h + t, back + h, col);
+        }
+    }
+
     pub fn text_width(text: &str, size: f32) -> f32 {
         let n = text.chars().count() as f32;
         (n * font::ADVANCE - 1.0) * size
@@ -226,14 +242,16 @@ impl Hud {
             ButtonDef { id: Button::Brake, center: vec2(w - 218.0 * s, h - 72.0 * s), radius: 46.0 * s },
             ButtonDef { id: Button::Nitro, center: vec2(w - 82.0 * s, h - 248.0 * s), radius: 38.0 * s },
             ButtonDef { id: Button::Handbrake, center: vec2(w - 208.0 * s, h - 190.0 * s), radius: 38.0 * s },
-            ButtonDef { id: Button::LookBack, center: vec2(w - 318.0 * s, h - 52.0 * s), radius: 28.0 * s },
+            ButtonDef { id: Button::LookBack, center: vec2(w - 318.0 * s, h - 150.0 * s), radius: 28.0 * s },
             ButtonDef { id: Button::Pause, center: vec2(44.0 * s, 44.0 * s), radius: 24.0 * s },
             ButtonDef { id: Button::Camera, center: vec2(w - 48.0 * s, 44.0 * s), radius: 26.0 * s },
             ButtonDef { id: Button::Reset, center: vec2(w - 116.0 * s, 44.0 * s), radius: 26.0 * s },
         ];
         if self.steer_mode == SteerMode::Buttons {
-            b.push(ButtonDef { id: Button::SteerLeft, center: vec2(90.0 * s, h - 100.0 * s), radius: 56.0 * s });
-            b.push(ButtonDef { id: Button::SteerRight, center: vec2(225.0 * s, h - 100.0 * s), radius: 56.0 * s });
+            // Side by side, bottom left, like most mobile racers; the touch zones (1.2 x radius)
+            // meet in the middle so a thumb can rock between them.
+            b.push(ButtonDef { id: Button::SteerLeft, center: vec2(78.0 * s, h - 84.0 * s), radius: 50.0 * s });
+            b.push(ButtonDef { id: Button::SteerRight, center: vec2(198.0 * s, h - 84.0 * s), radius: 50.0 * s });
         }
         self.buttons = b;
         self.joy_radius = 70.0 * s;
@@ -353,9 +371,15 @@ impl Hud {
                 let fill = if held { [ACCENT[0], ACCENT[1], ACCENT[2], 0.45 * o] } else { [0.0, 0.0, 0.0, 0.30 * o] };
                 c.circle(b.center, b.radius, fill);
                 c.ring(b.center, b.radius, 2.5 * s, [1.0, 1.0, 1.0, if held { 0.95 } else { 0.7 * o }]);
+                let icon = [1.0, 1.0, 1.0, 0.9 * o.max(0.6)];
+                if matches!(b.id, Button::SteerLeft | Button::SteerRight) {
+                    let dir = if b.id == Button::SteerLeft { -1.0 } else { 1.0 };
+                    c.chevrons(b.center, b.radius * 0.62, dir, 8.0 * s, icon);
+                    continue;
+                }
                 let label = b.id.label();
                 let size = (b.radius * 0.5 / (font::ADVANCE * label.len().max(3) as f32 * 0.5)).min(3.2 * s);
-                c.text(b.center.x, b.center.y - font::HEIGHT * size * 0.5, size, 0.5, label, [1.0, 1.0, 1.0, 0.9 * o.max(0.6)]);
+                c.text(b.center.x, b.center.y - font::HEIGHT * size * 0.5, size, 0.5, label, icon);
             }
             if self.steer_mode == SteerMode::Joystick {
                 if self.joystick_active() {
