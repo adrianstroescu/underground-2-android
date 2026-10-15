@@ -1,0 +1,5 @@
+[package]
+name = "ug2-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

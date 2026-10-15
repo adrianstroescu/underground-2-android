@@ -1,0 +1,9 @@
+[package]
+name = "ug2-formats"
+description = "Parsers for Need for Speed: Underground 2 (PC) data files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true

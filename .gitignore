@@ -1,0 +1,14 @@
+/target/
+/build/
+*.apk
+*.idsig
+*.keystore
+*.jks
+# Never commit EA game data
+*.BUN
+*.bun
+*.BIN
+*.bin
+*.lzc
+*.vp6
+/game/

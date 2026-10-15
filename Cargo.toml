@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ug2-formats",
+    "crates/ug2-tool",
+    "crates/ug2-engine",
+    "crates/ug2-desktop",
+    "crates/ug2-android",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/adrianstroescu/underground-2-android"
+
+[workspace.dependencies]
+ug2-formats = { path = "crates/ug2-formats" }
+ug2-engine = { path = "crates/ug2-engine" }
+wgpu = "25"
+glam = { version = "0.30", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+anyhow = "1"
+pollster = "0.4"
+png = "0.17"
+raw-window-handle = "0.6"
+
+[profile.dev]
+opt-level = 1
+
+# Asset decoding (JDLZ/HUFF/DXT) is painfully slow unoptimized.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+debug = false

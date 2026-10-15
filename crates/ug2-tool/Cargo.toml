@@ -1,0 +1,13 @@
+[package]
+name = "ug2-tool"
+description = "Inspect and export Need for Speed: Underground 2 data files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ug2-formats.workspace = true
+anyhow.workspace = true
+log.workspace = true
+png.workspace = true
+env_logger = "0.11"
