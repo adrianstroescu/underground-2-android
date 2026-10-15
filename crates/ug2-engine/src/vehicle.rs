@@ -36,6 +36,8 @@ const GEAR_TOP: [f32; 6] = [14.0, 24.0, 35.0, 47.0, 60.0, MAX_SPEED];
 /// Cornering grip (m/s², ~2 g, arcade): caps the yaw rate at speed to v·ω ≤ this, so full
 /// lock from on/off touch buttons gives a fast but drivable turn instead of a spin.
 const MAX_LAT_ACCEL: f32 = 20.0;
+/// Floor for that cap (rad/s, ~40°/s) so the car still answers the buttons at 150+ km/h.
+const MIN_YAW_CAP: f32 = 0.7;
 
 impl Vehicle {
     pub fn new(pos: Vec3, yaw: f32, ride_height: f32, wheelbase: f32) -> Self {
@@ -137,7 +139,7 @@ impl Vehicle {
             // Yaw from a bicycle model; handbrake adds rotation for drifts.
             let steer_angle = self.steer * 0.6;
             let mut target_rate = v_long / self.wheelbase * steer_angle.tan();
-            let max_rate = MAX_LAT_ACCEL / v_long.abs().max(1.0);
+            let max_rate = (MAX_LAT_ACCEL / v_long.abs().max(1.0)).max(MIN_YAW_CAP);
             target_rate = target_rate.clamp(-max_rate, max_rate);
             if c.handbrake {
                 target_rate *= 1.6;
