@@ -46,10 +46,14 @@ impl Canvas {
     }
 
     pub fn circle(&mut self, c: Vec2, r: f32, col: Rgba) {
-        let n = 40;
+        self.sector(c, r, 0.0, std::f32::consts::TAU, col);
+    }
+
+    pub fn sector(&mut self, c: Vec2, r: f32, from: f32, to: f32, col: Rgba) {
+        let n = ((to - from).abs() / std::f32::consts::TAU * 40.0).ceil().max(2.0) as usize;
         for i in 0..n {
-            let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
-            let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+            let a0 = from + (to - from) * i as f32 / n as f32;
+            let a1 = from + (to - from) * (i + 1) as f32 / n as f32;
             self.tri(c, c + vec2(a0.cos(), a0.sin()) * r, c + vec2(a1.cos(), a1.sin()) * r, col);
         }
     }
@@ -74,20 +78,72 @@ impl Canvas {
         self.tri(a, b, c, col);
     }
 
-    /// Double chevron (« or ») centred on `c`; `dir` is -1 for left, +1 for right.
-    /// Each chevron is two parallelograms sharing an edge, so translucent colours don't
-    /// double up where the arms meet.
-    pub fn chevrons(&mut self, c: Vec2, size: f32, dir: f32, thickness: f32, col: Rgba) {
-        let t = vec2(thickness * dir, 0.0);
-        let h = vec2(0.0, 0.5 * size);
-        for off in [-0.22, 0.22] {
-            let tip = c + vec2((off + 0.25 - thickness / size * 0.5) * size * dir, 0.0);
-            let back = tip - vec2(0.5 * size * dir, 0.0);
+    pub fn line(&mut self, a: Vec2, b: Vec2, thickness: f32, col: Rgba) {
+        let n = (b - a).perp().normalize_or_zero() * thickness * 0.5;
+        self.tri(a - n, b - n, b + n, col);
+        self.tri(a - n, b + n, a + n, col);
+    }
+
+    /// `count` chevrons centred on `c` pointing along the unit vector `dir` (« », a stack
+    /// of ^). Each chevron is two parallelograms sharing an edge, so translucent colours
+    /// don't double up where the arms meet.
+    pub fn chevrons(&mut self, c: Vec2, size: f32, dir: Vec2, count: usize, thickness: f32, col: Rgba) {
+        let t = dir * thickness;
+        let h = dir.perp() * 0.5 * size;
+        for i in 0..count {
+            let off = (i as f32 - (count - 1) as f32 * 0.5) * 0.44;
+            let tip = c + dir * ((off + 0.25 - thickness / size * 0.5) * size);
+            let back = tip - dir * 0.5 * size;
             self.tri(back - h, back - h + t, tip + t, col);
             self.tri(back - h, tip + t, tip, col);
             self.tri(tip, tip + t, back + h + t, col);
             self.tri(tip, back + h + t, back + h, col);
         }
+    }
+
+    /// Corner centres of a rounded rectangle and the angle each quarter arc starts at.
+    fn corners(c: Vec2, half: Vec2, r: f32) -> [(Vec2, f32); 4] {
+        let a = half - Vec2::splat(r);
+        let q = std::f32::consts::FRAC_PI_2;
+        [(c + vec2(-a.x, -a.y), 2.0 * q), (c + vec2(a.x, -a.y), 3.0 * q), (c + a, 0.0), (c + vec2(-a.x, a.y), q)]
+    }
+
+    /// Filled rounded rectangle from non-overlapping pieces (safe for translucent colours).
+    pub fn rounded_rect(&mut self, c: Vec2, half: Vec2, r: f32, col: Rgba) {
+        let (min, size) = (c - half, half * 2.0);
+        self.rect(min.x + r, min.y, size.x - 2.0 * r, size.y, col);
+        self.rect(min.x, min.y + r, r, size.y - 2.0 * r, col);
+        self.rect(min.x + size.x - r, min.y + r, r, size.y - 2.0 * r, col);
+        for (cc, a) in Self::corners(c, half, r) {
+            self.sector(cc, r, a, a + std::f32::consts::FRAC_PI_2, col);
+        }
+    }
+
+    /// Outline of a rounded rectangle, `thickness` centred on the edge (like `ring`).
+    pub fn rounded_rect_outline(&mut self, c: Vec2, half: Vec2, r: f32, thickness: f32, col: Rgba) {
+        let (min, max, t) = (c - half, c + half, thickness);
+        let (w, h) = (max.x - min.x - 2.0 * r, max.y - min.y - 2.0 * r);
+        self.rect(min.x + r, min.y - t * 0.5, w, t, col);
+        self.rect(min.x + r, max.y - t * 0.5, w, t, col);
+        self.rect(min.x - t * 0.5, min.y + r, t, h, col);
+        self.rect(max.x - t * 0.5, min.y + r, t, h, col);
+        for (cc, a) in Self::corners(c, half, r) {
+            self.arc(cc, r, t, a, a + std::f32::consts::FRAC_PI_2, col);
+        }
+    }
+
+    /// Side view of a hanging pedal: slanted pad, arm and pivot. `size` ≈ icon width.
+    pub fn pedal_icon(&mut self, c: Vec2, size: f32, col: Rgba) {
+        let s = size;
+        let d = vec2(0.524, -0.852); // pad direction, toe up and forward
+        let n = vec2(-0.852, -0.524); // from the pad's back towards the pivot
+        let mid = c + vec2(0.14, 0.06) * s;
+        let pad_t = 0.28 * s;
+        self.line(mid - d * 0.44 * s, mid + d * 0.44 * s, pad_t, col);
+        let arm0 = mid + n * pad_t * 0.5;
+        let pivot = arm0 + n * 0.36 * s;
+        self.line(arm0, pivot, 0.12 * s, col);
+        self.circle(pivot, 0.11 * s, col);
     }
 
     pub fn text_width(text: &str, size: f32) -> f32 {
@@ -168,10 +224,45 @@ impl Button {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Shape {
+    Circle(f32),
+    /// Rounded rectangle (GAS/BRAKE pedals), half extents.
+    Pedal(Vec2),
+}
+
 struct ButtonDef {
     id: Button,
     center: Vec2,
-    radius: f32,
+    shape: Shape,
+}
+
+impl ButtonDef {
+    fn circle(id: Button, center: Vec2, radius: f32) -> Self {
+        Self { id, center, shape: Shape::Circle(radius) }
+    }
+
+    fn pedal(id: Button, center: Vec2, half: Vec2) -> Self {
+        Self { id, center, shape: Shape::Pedal(half) }
+    }
+
+    /// Distance from the centre, scaled so the edge of the (slightly enlarged) touch
+    /// area is 1.0.
+    fn reach(&self, p: Vec2) -> f32 {
+        let d = p - self.center;
+        match self.shape {
+            Shape::Circle(r) => d.length() / (r * 1.2),
+            Shape::Pedal(half) => (d.abs() / (half * 1.15)).max_element(),
+        }
+    }
+
+    /// Radius of the largest circle that fits, for sizing labels and icons.
+    fn inner_radius(&self) -> f32 {
+        match self.shape {
+            Shape::Circle(r) => r,
+            Shape::Pedal(half) => half.min_element(),
+        }
+    }
 }
 
 enum Owner {
@@ -237,21 +328,23 @@ impl Hud {
         self.dp = dp;
         let s = dp;
         let (w, h) = (width, height);
+        // Pedals bottom right with their bottoms aligned (tall GAS outside, BRAKE inside),
+        // like most mobile racers; nitro and handbrake sit above them.
         let mut b = vec![
-            ButtonDef { id: Button::Gas, center: vec2(w - 95.0 * s, h - 105.0 * s), radius: 58.0 * s },
-            ButtonDef { id: Button::Brake, center: vec2(w - 218.0 * s, h - 72.0 * s), radius: 46.0 * s },
-            ButtonDef { id: Button::Nitro, center: vec2(w - 82.0 * s, h - 248.0 * s), radius: 38.0 * s },
-            ButtonDef { id: Button::Handbrake, center: vec2(w - 208.0 * s, h - 190.0 * s), radius: 38.0 * s },
-            ButtonDef { id: Button::LookBack, center: vec2(w - 318.0 * s, h - 150.0 * s), radius: 28.0 * s },
-            ButtonDef { id: Button::Pause, center: vec2(44.0 * s, 44.0 * s), radius: 24.0 * s },
-            ButtonDef { id: Button::Camera, center: vec2(w - 48.0 * s, 44.0 * s), radius: 26.0 * s },
-            ButtonDef { id: Button::Reset, center: vec2(w - 116.0 * s, 44.0 * s), radius: 26.0 * s },
+            ButtonDef::pedal(Button::Gas, vec2(w - 74.0 * s, h - 98.0 * s), vec2(40.0, 70.0) * s),
+            ButtonDef::pedal(Button::Brake, vec2(w - 176.0 * s, h - 74.0 * s), vec2(36.0, 46.0) * s),
+            ButtonDef::circle(Button::Nitro, vec2(w - 74.0 * s, h - 232.0 * s), 34.0 * s),
+            ButtonDef::circle(Button::Handbrake, vec2(w - 176.0 * s, h - 178.0 * s), 34.0 * s),
+            ButtonDef::circle(Button::LookBack, vec2(w - 272.0 * s, h - 150.0 * s), 28.0 * s),
+            ButtonDef::circle(Button::Pause, vec2(44.0 * s, 44.0 * s), 24.0 * s),
+            ButtonDef::circle(Button::Camera, vec2(w - 48.0 * s, 44.0 * s), 26.0 * s),
+            ButtonDef::circle(Button::Reset, vec2(w - 116.0 * s, 44.0 * s), 26.0 * s),
         ];
         if self.steer_mode == SteerMode::Buttons {
-            // Side by side, bottom left, like most mobile racers; the touch zones (1.2 x radius)
-            // meet in the middle so a thumb can rock between them.
-            b.push(ButtonDef { id: Button::SteerLeft, center: vec2(78.0 * s, h - 84.0 * s), radius: 50.0 * s });
-            b.push(ButtonDef { id: Button::SteerRight, center: vec2(198.0 * s, h - 84.0 * s), radius: 50.0 * s });
+            // Side by side, bottom left; the touch zones (1.2 x radius) meet in the middle
+            // so a thumb can rock between them.
+            b.push(ButtonDef::circle(Button::SteerLeft, vec2(78.0 * s, h - 84.0 * s), 50.0 * s));
+            b.push(ButtonDef::circle(Button::SteerRight, vec2(198.0 * s, h - 84.0 * s), 50.0 * s));
         }
         self.buttons = b;
         self.joy_radius = 70.0 * s;
@@ -261,7 +354,7 @@ impl Hud {
         self.buttons
             .iter()
             .filter(|b| group.is_none_or(|g| b.id.slide_group() == g))
-            .map(|b| (b, b.center.distance(p) / (b.radius * 1.2)))
+            .map(|b| (b, b.reach(p)))
             .filter(|(_, d)| *d <= 1.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(b, _)| b.id)
@@ -369,17 +462,30 @@ impl Hud {
             for b in &self.buttons {
                 let held = self.held(b.id);
                 let fill = if held { [ACCENT[0], ACCENT[1], ACCENT[2], 0.45 * o] } else { [0.0, 0.0, 0.0, 0.30 * o] };
-                c.circle(b.center, b.radius, fill);
-                c.ring(b.center, b.radius, 2.5 * s, [1.0, 1.0, 1.0, if held { 0.95 } else { 0.7 * o }]);
-                let icon = [1.0, 1.0, 1.0, 0.9 * o.max(0.6)];
-                if matches!(b.id, Button::SteerLeft | Button::SteerRight) {
-                    let dir = if b.id == Button::SteerLeft { -1.0 } else { 1.0 };
-                    c.chevrons(b.center, b.radius * 0.62, dir, 8.0 * s, icon);
-                    continue;
+                let edge = [1.0, 1.0, 1.0, if held { 0.95 } else { 0.7 * o }];
+                match b.shape {
+                    Shape::Circle(r) => {
+                        c.circle(b.center, r, fill);
+                        c.ring(b.center, r, 2.5 * s, edge);
+                    }
+                    Shape::Pedal(half) => {
+                        c.rounded_rect(b.center, half, 14.0 * s, fill);
+                        c.rounded_rect_outline(b.center, half, 14.0 * s, 2.5 * s, edge);
+                    }
                 }
-                let label = b.id.label();
-                let size = (b.radius * 0.5 / (font::ADVANCE * label.len().max(3) as f32 * 0.5)).min(3.2 * s);
-                c.text(b.center.x, b.center.y - font::HEIGHT * size * 0.5, size, 0.5, label, icon);
+                let icon = [1.0, 1.0, 1.0, 0.9 * o.max(0.6)];
+                let r = b.inner_radius();
+                match b.id {
+                    Button::SteerLeft => c.chevrons(b.center, r * 0.62, vec2(-1.0, 0.0), 2, 8.0 * s, icon),
+                    Button::SteerRight => c.chevrons(b.center, r * 0.62, vec2(1.0, 0.0), 2, 8.0 * s, icon),
+                    Button::Gas => c.chevrons(b.center, r * 0.9, vec2(0.0, -1.0), 3, 7.0 * s, icon),
+                    Button::Brake => c.pedal_icon(b.center, r * 1.25, icon),
+                    _ => {
+                        let label = b.id.label();
+                        let size = (r * 0.5 / (font::ADVANCE * label.len().max(3) as f32 * 0.5)).min(3.2 * s);
+                        c.text(b.center.x, b.center.y - font::HEIGHT * size * 0.5, size, 0.5, label, icon);
+                    }
+                }
             }
             if self.steer_mode == SteerMode::Joystick {
                 if self.joystick_active() {

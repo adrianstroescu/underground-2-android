@@ -11,7 +11,7 @@ Nu emulăm nimic: nu rulăm `speed2.exe`, nu folosim Wine/Box64/x86. Motorul cit
 - Orașul Bayview complet, încărcat din `TRACKS/STREAML4RA.BUN`: 583 de secțiuni, ~900k triunghiuri, ~1.900 de texturi, cer cu nori, neoane (blending aditiv), garduri și vegetație (alpha).
 - Nissan 350Z stoc, cu roți poziționate din `CarTypeInfo` (GLOBALB), vopsea configurabilă.
 - Condus: fizică arcade (accelerație, frână, mers înapoi, frână de mână cu drift, nitro, cutie automată cu 6 trepte), urmărirea terenului, coliziune cu clădiri, ziduri și parapeți.
-- HUD tactil multi-touch: butoane « » pentru direcție (sau joystick virtual), GAS, BRAKE, NOS, E-BRAKE, LOOK (privire înapoi), CAM, RESET, pauză; vitezometru, treaptă, turație, nitro, FPS.
+- HUD tactil multi-touch: butoane « » pentru direcție (sau joystick virtual), pedale GAS și BRAKE, NOS, E-BRAKE, LOOK (privire înapoi), CAM, RESET, pauză; vitezometru, treaptă, turație, nitro, FPS.
 - Gamepad (Bluetooth/USB) și tastatură, cu mapare editabilă în `controls.cfg`.
 - Testat pe Galaxy S23 Ultra (Adreno 740, Android 16): **~120 FPS** la ~1.800 de draw call-uri, orașul se încarcă în ~1 s.
 - Testat și în emulatorul Android (x86_64, Vulkan): 40–50 FPS pe un GPU Intel integrat.
@@ -40,8 +40,8 @@ Fișierele ajung în `/sdcard/Android/data/com.adrianstroescu.ug2/files/NFSU2/` 
 | Acțiune | Touch | Gamepad | Tastatură |
 |---|---|---|---|
 | Direcție | butoanele « » (sau joystick, din `ug2.cfg`) | stick stânga / D-pad | ← → / A D |
-| Accelerație | GAS | R2 / R1 | ↑ / W |
-| Frână / înapoi | BRAKE | L2 / L1 | ↓ / S |
+| Accelerație | pedala GAS (dreapta, cu săgeți) | R2 / R1 | ↑ / W |
+| Frână / înapoi | pedala BRAKE | L2 / L1 | ↓ / S |
 | Frână de mână | E-BRAKE | X | Space |
 | Nitro | NOS | A | Shift / N |
 | Cameră | CAM | Y | C |
