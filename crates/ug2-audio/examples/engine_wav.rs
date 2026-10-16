@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("usage: engine_wav <game-dir> <CAR> <out.wav>"),
     };
     let game = GameDir::new(dir);
-    let engine = EngineSound::load(&game, car).ok_or_else(|| anyhow::anyhow!("no engine sound for {car}"))?;
+    let engine = EngineSound::load(&game, car, 0).ok_or_else(|| anyhow::anyhow!("no engine sound for {car}"))?;
     println!(
         "{car}: accel GIN {:.0}-{:.0} rpm @ {} Hz, {} grains; decel {}",
         engine.accel.min_rpm,

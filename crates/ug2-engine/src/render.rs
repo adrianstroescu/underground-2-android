@@ -125,6 +125,8 @@ pub struct CarDraw {
     pub skin: Option<u32>,
     /// 0 = tail lights only, 1 = full brake lights.
     pub brake: f32,
+    /// Window tint colour (white = stock).
+    pub glass: [f32; 3],
 }
 
 struct GpuMesh {
@@ -558,7 +560,8 @@ impl Renderer {
             let lit = [MODE_CAR, 0.5, 1.0, 1.0];
             slots.push(slot(t, one, lit, none));
             slots.push(slot(t, [p[0], p[1], p[2], 1.0], lit, none));
-            slots.push(slot(t, one, [MODE_GLASS, 0.0, 1.0, 1.0], none));
+            let g = c.glass;
+            slots.push(slot(t, [g[0], g[1], g[2], 1.0], [MODE_GLASS, 0.0, 1.0, 1.0], none));
             // Headlights are always on (the city is at night); brake lights glow dimly as
             // tail lights and fully when braking.
             slots.push(slot(t, one, lit, [1.3, 1.3, 1.2, 0.0]));

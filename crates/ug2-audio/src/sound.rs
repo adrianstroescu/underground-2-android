@@ -67,9 +67,9 @@ pub struct EngineSound {
 }
 
 impl EngineSound {
-    /// Stock engine of a racer (`None` for traffic models).
-    pub fn load(game: &GameDir, car: &str) -> Option<Self> {
-        let (engine, gear, _turbo) = car_sounds(car, 0)?;
+    /// Engine of a racer at upgrade `level` (0 = stock .. 3); `None` for traffic models.
+    pub fn load(game: &GameDir, car: &str, level: usize) -> Option<Self> {
+        let (engine, gear, _turbo) = car_sounds(car, level)?;
         let gin = |name: &str| {
             let b = game.read(&format!("SOUND/ENGINE/{name}")).ok()?;
             Gin::parse(&b).map_err(|e| log::warn!("{name}: {e}")).ok().map(Arc::new)

@@ -63,6 +63,10 @@ pub struct PartSet {
     pub spoiler: u8,
     /// Carbon-fibre spoiler.
     pub spoiler_cf: bool,
+    /// Underglow colour (index into the neon palette), 0 = none.
+    pub neon: u8,
+    /// Window tint (index into the tint palette), 0 = stock.
+    pub tint: u8,
 }
 
 impl PartSet {

@@ -103,6 +103,7 @@ pub enum LoadEvent {
     /// Model key of a car that could not be loaded.
     CarFailed(String),
     Effects(Box<Effects>),
+    /// Engine sound, keyed "<CAR>#<level>".
     Engine { car: String, sound: Box<EngineSound> },
     Roads(Box<RoadData>),
     Collision(CollisionWorld),
@@ -125,6 +126,8 @@ pub struct LoaderConfig {
 /// Requests the game sends to the loader thread.
 pub enum LoadRequest {
     Car { name: String, parts: ug2_formats::car::PartSet },
+    /// Engine sound of `car` at upgrade `level` (the stock one comes with the car).
+    Engine { car: String, level: usize },
 }
 
 /// Background loader: loads the player's car and the world, then serves car requests.
@@ -163,6 +166,11 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             for req in req_rx {
                 match req {
                     LoadRequest::Car { name, parts } => send_car(&game, &shared, &mut lib, &cfg, &name, &parts, &tx),
+                    LoadRequest::Engine { car, level } => {
+                        if let Some(sound) = EngineSound::load(&game, &car, level) {
+                            let _ = tx.send(LoadEvent::Engine { car: format!("{car}#{level}"), sound: Box::new(sound) });
+                        }
+                    }
                 }
             }
         })
@@ -188,8 +196,8 @@ fn send_car(
             let _ = tx.send(LoadEvent::Textures(prepared));
             log::info!("car {name} loaded in {:.0?}", t0.elapsed());
             let _ = tx.send(LoadEvent::Car(Box::new(car)));
-            if let Some(sound) = EngineSound::load(game, name) {
-                let _ = tx.send(LoadEvent::Engine { car: name.to_string(), sound: Box::new(sound) });
+            if let Some(sound) = EngineSound::load(game, name, 0) {
+                let _ = tx.send(LoadEvent::Engine { car: format!("{name}#0"), sound: Box::new(sound) });
             }
         }
         Err(e) => {

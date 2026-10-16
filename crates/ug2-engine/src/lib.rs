@@ -93,6 +93,28 @@ impl ModelInfo {
     }
 }
 
+/// Underglow colours (index 1..).
+const NEONS: &[(&str, [u8; 3])] = &[
+    ("BLUE", [40, 90, 255]),
+    ("GREEN", [40, 255, 90]),
+    ("RED", [255, 30, 30]),
+    ("PURPLE", [170, 40, 255]),
+    ("PINK", [255, 60, 190]),
+    ("CYAN", [40, 230, 255]),
+    ("YELLOW", [255, 220, 40]),
+    ("WHITE", [235, 240, 255]),
+];
+
+/// Window tints (index 1..): darker glass multipliers.
+const TINTS: &[(&str, [f32; 3])] = &[
+    ("LIGHT SMOKE", [0.65, 0.65, 0.68]),
+    ("DARK SMOKE", [0.4, 0.4, 0.42]),
+    ("LIMO", [0.18, 0.18, 0.2]),
+    ("GREEN", [0.45, 0.7, 0.5]),
+    ("BLUE", [0.4, 0.5, 0.8]),
+    ("GOLD", [0.8, 0.65, 0.35]),
+];
+
 /// Paint colours offered in the menus.
 const PAINTS: &[(&str, [f32; 3])] = &[
     ("ORANGE", [0.85, 0.32, 0.05]),
@@ -361,9 +383,7 @@ impl Game {
             self.vehicle.reset(pos + Vec3::Z * 0.3, yaw);
         }
         self.player_car = Some(key.to_string());
-        if let Some(e) = self.engine_sounds.get(name).cloned() {
-            self.sound.with(|m| m.set_engine(&e));
-        }
+        self.apply_engine_sound();
     }
 
     /// Stock performance of `car`.
@@ -377,6 +397,28 @@ impl Game {
         match &self.career {
             Some(c) if c.owned.iter().any(|o| o == car) => c.perf(car, base),
             _ => base,
+        }
+    }
+
+    /// Engine sound for the player's car at its engine upgrade level, loading it if needed.
+    fn apply_engine_sound(&mut self) {
+        let Some(key) = &self.player_car else { return };
+        let car = car_name(key).to_string();
+        let level = match &self.career {
+            Some(c) if self.in_career => c.engine_level(&car),
+            _ => 0,
+        };
+        let sound_key = format!("{car}#{level}");
+        match self.engine_sounds.get(&sound_key).cloned() {
+            Some(e) => {
+                self.sound.with(|m| m.set_engine(&e));
+            }
+            None if level > 0 => {
+                if let Some(l) = &self.loader {
+                    l.request(LoadRequest::Engine { car, level });
+                }
+            }
+            None => {}
         }
     }
 
@@ -454,11 +496,8 @@ impl Game {
                     self.sound.with(|m| m.set_effects(*fx));
                 }
                 LoadEvent::Engine { car, sound } => {
-                    let sound = Arc::new(*sound);
-                    if self.player_car.as_deref() == Some(car.as_str()) {
-                        self.sound.with(|m| m.set_engine(&sound));
-                    }
-                    self.engine_sounds.insert(car, sound);
+                    self.engine_sounds.insert(car, Arc::new(*sound));
+                    self.apply_engine_sound();
                 }
                 LoadEvent::Roads(r) => self.roads = Some(*r),
                 LoadEvent::Rims(r) => self.rim_names = r,
@@ -801,14 +840,19 @@ impl Game {
         if let (true, Some(m)) = (self.spawned, self.player_model()) {
             let t = self.vehicle.transform();
             let wheels = wheel_transforms(&self.vehicle, t, &m.wheels);
-            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light });
+            let parts = self.cfg.parts_for(car_name(self.player_car.as_deref().unwrap_or("")));
+            let glass = TINTS.get((parts.tint as usize).wrapping_sub(1)).map_or([1.0; 3], |t| t.1);
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light, glass });
             push_car_glows(&mut glows, m, t, self.brake_light, right, up);
+            if let Some(&(_, color)) = NEONS.get((parts.neon as usize).wrapping_sub(1)) {
+                push_neon(&mut glows, m, t, color);
+            }
         }
         for o in &self.session.opponents {
             let Some(m) = self.models.get(&o.model) else { continue };
             let t = o.vehicle.transform();
             let wheels = wheel_transforms(&o.vehicle, t, &m.wheels);
-            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: o.paint, skin: None, brake: o.brake_light });
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: o.paint, skin: None, brake: o.brake_light, glass: [1.0; 3] });
             if near(o.vehicle.pos) {
                 push_car_glows(&mut glows, m, t, o.brake_light, right, up);
             }
@@ -818,7 +862,7 @@ impl Game {
             let t = c.vehicle.transform();
             let wheels = wheel_transforms(&c.vehicle, t, &m.wheels);
             let skin = m.skins.get(c.skin).copied();
-            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: [0.5; 3], skin, brake: c.brake_light });
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: [0.5; 3], skin, brake: c.brake_light, glass: [1.0; 3] });
             if near(c.vehicle.pos) {
                 push_car_glows(&mut glows, m, t, c.brake_light, right, up);
             }
@@ -972,6 +1016,24 @@ fn push_world_glows(out: &mut Vec<GpuVertex>, lights: &[ug2_formats::light::Worl
         // Pull the sprite towards the camera so the lamp's own mesh does not clip it.
         let c = p - to / d * 0.6;
         glow_quad(out, c, size, [l.color[0], l.color[1], l.color[2], a], right, up);
+    }
+}
+
+/// Underglow: a coloured pool on the road under the car, brightest in the middle.
+fn push_neon(out: &mut Vec<GpuVertex>, m: &ModelInfo, t: Mat4, color: [u8; 3]) {
+    let z = -m.physics.ride_height + 0.05;
+    let center = Vec3::new(m.front * 0.5 - 0.6, 0.0, z);
+    let (rx, ry) = (m.front + 0.6, 1.7);
+    let uv = [0.5, 0.5];
+    let mid = GpuVertex { pos: t.transform_point3(center).into(), normal: [0.0; 3], color: [color[0], color[1], color[2], 150], uv };
+    let n = 20;
+    let rim = |i: usize| {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let p = center + Vec3::new(a.cos() * rx, a.sin() * ry, 0.0);
+        GpuVertex { pos: t.transform_point3(p).into(), normal: [0.0; 3], color: [color[0], color[1], color[2], 0], uv }
+    };
+    for i in 0..n {
+        out.extend_from_slice(&[mid, rim(i), rim(i + 1)]);
     }
 }
 

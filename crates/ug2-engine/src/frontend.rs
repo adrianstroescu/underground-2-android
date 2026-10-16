@@ -63,6 +63,8 @@ enum Row {
     Lights,
     Rims,
     Spoiler,
+    Neon,
+    Tint,
     BuyCar,
     BuyNow,
     Upgrade(usize),
@@ -104,7 +106,7 @@ impl Game {
                 } else {
                     v.push(Row::Car);
                 }
-                v.extend([Row::Kit, Row::Widebody, Row::Hood, Row::Lights, Row::Rims, Row::Spoiler, Row::Color]);
+                v.extend([Row::Kit, Row::Widebody, Row::Hood, Row::Lights, Row::Rims, Row::Spoiler, Row::Neon, Row::Tint, Row::Color]);
                 v.push(if self.in_career { Row::BackToCareer } else { Row::Back });
                 v
             }
@@ -203,6 +205,16 @@ impl Game {
                         i => self.rim_names.get(i as usize - 1).cloned().unwrap_or_else(|| format!("RIM {i}")),
                     };
                     MenuItem::choice("RIMS", value)
+                }
+                Row::Neon => {
+                    let p = self.cfg.parts_for(&self.current_car());
+                    let v = crate::NEONS.get((p.neon as usize).wrapping_sub(1)).map_or("NONE", |n| n.0);
+                    MenuItem::choice("NEON", v)
+                }
+                Row::Tint => {
+                    let p = self.cfg.parts_for(&self.current_car());
+                    let v = crate::TINTS.get((p.tint as usize).wrapping_sub(1)).map_or("STOCK", |n| n.0);
+                    MenuItem::choice("WINDOW TINT", v)
                 }
                 Row::Spoiler => {
                     let p = self.cfg.parts_for(&self.current_car());
@@ -354,6 +366,18 @@ impl Game {
             Row::Widebody => self.change_part(|p| p.widebody = (p.widebody as i32 + step).rem_euclid(5) as u8),
             Row::Hood => self.change_part(|p| p.hood = (p.hood as i32 + step).rem_euclid(29) as u8),
             Row::Lights => self.change_part(|p| p.lights = (p.lights as i32 + step).rem_euclid(15) as u8),
+            // Neon and tint are drawn per frame: no model reload needed.
+            Row::Neon | Row::Tint => {
+                let car = self.current_car();
+                let mut p = self.cfg.parts_for(&car);
+                if row == Row::Neon {
+                    p.neon = (p.neon as i32 + step).rem_euclid(crate::NEONS.len() as i32 + 1) as u8;
+                } else {
+                    p.tint = (p.tint as i32 + step).rem_euclid(crate::TINTS.len() as i32 + 1) as u8;
+                }
+                self.cfg.parts.insert(car, p);
+                self.cfg.save(&self.config_path);
+            }
             Row::Rims => {
                 let n = self.rim_names.len() as i32 + 1;
                 self.change_part(|p| p.rim = (p.rim as i32 + step).rem_euclid(n) as u16);
@@ -391,6 +415,7 @@ impl Game {
                 if let Some(c) = &mut self.career {
                     if c.buy_upgrade(&car, k) {
                         self.vehicle.perf = self.perf_for(&car);
+                        self.apply_engine_sound();
                     }
                 }
             }

@@ -119,6 +119,8 @@ impl GameConfig {
                             rim: at(4),
                             spoiler: at(5) as u8,
                             spoiler_cf: at(6) != 0,
+                            neon: at(7) as u8,
+                            tint: at(8) as u8,
                         };
                         self.parts.insert(k["parts.".len()..].to_string(), p);
                     }
@@ -138,8 +140,8 @@ impl GameConfig {
         for (car, p) in &self.parts {
             if !p.is_stock() {
                 parts.push_str(&format!(
-                    "parts.{car} = {}, {}, {}, {}, {}, {}, {}\n",
-                    p.kit, p.widebody, p.hood, p.lights, p.rim, p.spoiler, p.spoiler_cf as u8
+                    "parts.{car} = {}, {}, {}, {}, {}, {}, {}, {}, {}\n",
+                    p.kit, p.widebody, p.hood, p.lights, p.rim, p.spoiler, p.spoiler_cf as u8, p.neon, p.tint
                 ));
             }
         }
