@@ -823,12 +823,23 @@ impl Game {
 
     /// Renders into `target`. Borrows the HUD canvas and the renderer as disjoint fields.
     fn render_to(&mut self, target: &wgpu::TextureView, width: u32, height: u32) {
-        let (view, eye) = if self.screen == Screen::Title && self.spawned {
-            // Slow orbit around the parked car behind the title menu.
-            let t = self.title_time * 0.15;
+        let orbit = matches!(self.screen, Screen::Title | Screen::Garage);
+        let (view, eye) = if orbit && self.spawned {
+            // Slow orbit around the parked car behind the title menu; in the garage the
+            // car sits on the right of the screen, next to the menu.
+            let garage = self.screen == Screen::Garage;
+            let t = self.title_time * if garage { 0.25 } else { 0.15 };
             let c = self.vehicle.pos + Vec3::Z * 0.6;
-            let eye = c + Vec3::new(t.cos() * 7.5, t.sin() * 7.5, 1.8);
-            (Mat4::look_at_rh(eye, c, Vec3::Z), eye)
+            let dist = if garage { 6.0 } else { 7.5 };
+            let eye = c + Vec3::new(t.cos() * dist, t.sin() * dist, if garage { 1.4 } else { 1.8 });
+            let target = if garage {
+                let fwd = (c - eye).normalize_or_zero();
+                let right = fwd.cross(Vec3::Z).normalize_or_zero();
+                c - right * 2.6
+            } else {
+                c
+            };
+            (Mat4::look_at_rh(eye, target, Vec3::Z), eye)
         } else {
             (self.camera.view(), self.camera.eye)
         };

@@ -163,7 +163,10 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
                 let _ = tx.send(LoadEvent::Failed(format!("{e:#}")));
                 return;
             }
-            let rims = lib.get_or_insert_with(|| PartLibrary::scan(&game)).rims.iter().map(|r| r.label.clone()).collect();
+            if lib.as_ref().is_none_or(|l| l.rims.is_empty()) {
+                lib = Some(PartLibrary::scan(&game));
+            }
+            let rims = lib.as_ref().map(|l| l.rims.iter().map(|r| r.label.clone()).collect()).unwrap_or_default();
             let _ = tx.send(LoadEvent::Rims(rims));
             for req in req_rx {
                 match req {
@@ -191,7 +194,10 @@ fn send_car(
 ) {
     let t0 = std::time::Instant::now();
     let needs_lib = parts.rim > 0 || parts.spoiler > 0;
-    let lib = if needs_lib { lib.get_or_insert_with(|| PartLibrary::scan(game)) } else { lib.get_or_insert_with(PartLibrary::default) };
+    if needs_lib && lib.as_ref().is_none_or(|l| l.rims.is_empty()) {
+        *lib = Some(PartLibrary::scan(game));
+    }
+    let lib = lib.get_or_insert_with(PartLibrary::default);
     match load_car(game, shared, lib, name, parts) {
         Ok((car, textures)) => {
             let prepared = textures.iter().filter_map(|t| prepare_texture(t, cfg.bc_textures)).collect();

@@ -328,7 +328,8 @@ pub fn wheel_transforms(v: &Vehicle, car: Mat4, wheels: &[WheelInfo; 4]) -> [Mat
     for (i, w) in wheels.iter().enumerate() {
         let p = Vec3::from(w.position);
         let steer = if p.x > 0.0 { v.steer * 0.6 } else { 0.0 };
-        let mirror = if p.y < 0.0 { Vec3::new(1.0, -1.0, 1.0) } else { Vec3::ONE };
+        // The wheel model faces the right side (-Y); mirror it for the left wheels.
+        let mirror = if p.y > 0.0 { Vec3::new(1.0, -1.0, 1.0) } else { Vec3::ONE };
         out[i] = car
             * Mat4::from_translation(p)
             * Mat4::from_quat(Quat::from_rotation_z(steer))

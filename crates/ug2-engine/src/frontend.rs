@@ -331,7 +331,8 @@ impl Game {
                 let won = self.career.as_ref().map_or(0, |c| c.won.len());
                 ("CAREER".to_string(), format!("CASH ${cash}  |  RACES WON {won}/{}", ladder.len()))
             }
-            Screen::Garage => ("GARAGE".to_string(), format!("CASH ${cash}")),
+            Screen::Garage if self.in_career => ("GARAGE".to_string(), format!("CASH ${cash}")),
+            Screen::Garage => ("GARAGE".to_string(), self.car_label()),
             Screen::QuickRace => {
                 let sub = self.selected_race().map_or(String::new(), |r| {
                     format!("{:.1} KM  |  REWARD ${}", r.line.length / 1000.0, r.reward)
@@ -354,6 +355,7 @@ impl Game {
         };
         self.menu.title = title;
         self.menu.subtitle = subtitle;
+        self.menu.anchor_left = self.screen == Screen::Garage;
         self.menu.items = items;
         if self.menu.selected >= rows.len() {
             self.menu.selected = 0;
