@@ -830,16 +830,9 @@ impl Game {
             let garage = self.screen == Screen::Garage;
             let t = self.title_time * if garage { 0.25 } else { 0.15 };
             let c = self.vehicle.pos + Vec3::Z * 0.6;
-            let dist = if garage { 6.0 } else { 7.5 };
+            let dist = if garage { 7.0 } else { 7.5 };
             let eye = c + Vec3::new(t.cos() * dist, t.sin() * dist, if garage { 1.4 } else { 1.8 });
-            let target = if garage {
-                let fwd = (c - eye).normalize_or_zero();
-                let right = fwd.cross(Vec3::Z).normalize_or_zero();
-                c - right * 2.6
-            } else {
-                c
-            };
-            (Mat4::look_at_rh(eye, target, Vec3::Z), eye)
+            (Mat4::look_at_rh(eye, c, Vec3::Z), eye)
         } else {
             (self.camera.view(), self.camera.eye)
         };
@@ -883,6 +876,9 @@ impl Game {
         let data = FrameData {
             view,
             fov_y: self.camera.fov_y,
+            // The garage menu covers the left of the screen: shift the image so the car
+            // sits in the free space on the right without looking at it from an angle.
+            lens_shift: if orbit && self.screen == Screen::Garage { 0.62 } else { 0.0 },
             cam_pos: eye,
             cars: &cars,
             glows: &glows,

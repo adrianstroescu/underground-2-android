@@ -164,6 +164,8 @@ struct GpuMesh {
 pub struct FrameData<'a> {
     pub view: Mat4,
     pub fov_y: f32,
+    /// Horizontal offset of the image in clip space (off-centre lens).
+    pub lens_shift: f32,
     pub cam_pos: Vec3,
     pub cars: &'a [CarDraw],
     /// World-space additive quads (light glows), drawn with `glow_texture`.
@@ -624,7 +626,7 @@ impl Renderer {
     /// are on, the mirrored view-projection.
     fn write_uniforms(&mut self, gpu: &Gpu, f: &FrameData, width: u32, height: u32) -> (Mat4, Option<Mat4>) {
         let aspect = width as f32 / height.max(1) as f32;
-        let proj = Mat4::perspective_rh(f.fov_y, aspect, 0.3, 4000.0);
+        let proj = Mat4::from_translation(Vec3::new(f.lens_shift, 0.0, 0.0)) * Mat4::perspective_rh(f.fov_y, aspect, 0.3, 4000.0);
         let view_proj = proj * f.view;
         let light = Vec3::new(0.35, -0.45, 0.82).normalize();
         let strength = if f.reflect_height.is_some() { f.reflect_strength } else { 0.0 };

@@ -62,7 +62,7 @@ impl Menu {
         let gap = (8.0 * s).min(fit * 0.15).max(3.0 * s);
         let col_gap = 10.0 * s;
         let total_w = if self.anchor_left {
-            size.x * 0.64
+            size.x * 0.58
         } else {
             let one = (size.x * 0.62).clamp(280.0 * s, 560.0 * s);
             (one * if cols == 2 { 1.6 } else { 1.0 }).min(size.x - 32.0 * s)
@@ -98,14 +98,15 @@ impl Menu {
                     c.text(x0 + width * 0.5, y + row_h * 0.5 - 3.5 * size, size, 0.5, &item.label, WHITE)
                 }
                 Some(v) => {
-                    let ls = fit_text(&item.label, width * 0.38);
+                    // The label must end before the left arrow at 0.42 of the row.
+                    let ls = fit_text(&item.label, width * 0.42 - 28.0 * s);
                     c.text(x0 + 16.0 * s, y + row_h * 0.5 - 3.5 * ls, ls, 0.0, &item.label, [1.0, 1.0, 1.0, 0.75]);
                     let vx = x0 + width * 0.68;
                     let arrow = 9.0 * s;
                     let cy = y + row_h * 0.5;
                     c.triangle(vec2(vx - width * 0.26, cy), vec2(vx - width * 0.26 + arrow, cy - arrow), vec2(vx - width * 0.26 + arrow, cy + arrow), ACCENT);
                     c.triangle(vec2(x0 + width - 14.0 * s, cy), vec2(x0 + width - 14.0 * s - arrow, cy - arrow), vec2(x0 + width - 14.0 * s - arrow, cy + arrow), ACCENT);
-                    let max_w = width * 0.4;
+                    let max_w = width * 0.36;
                     let size = (2.0 * s).min(max_w / Canvas::text_width(v, 1.0).max(1.0));
                     c.text(vx + 4.0 * s, cy - 3.5 * size, size, 0.5, v, WHITE);
                 }
