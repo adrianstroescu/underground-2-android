@@ -59,9 +59,7 @@ fn android_main(app: AndroidApp) {
                     let Some(w) = app.native_window() else { return };
                     // Run at the display's top refresh rate (120 Hz on the S23) instead of
                     // whatever the system picks for an unknown app.
-                    if let Err(e) = w.set_frame_rate(120.0, ndk::native_window::FrameRateCompatibility::Default) {
-                        log::warn!("set_frame_rate: {e}");
-                    }
+                    set_frame_rate(w.ptr().as_ptr() as *mut c_void, 120.0);
                     let (width, height) = (w.width().max(1) as u32, w.height().max(1) as u32);
                     let handle = AndroidNdkWindowHandle::new(NonNull::new(w.ptr().as_ptr() as *mut c_void).unwrap());
                     let target = wgpu::SurfaceTargetUnsafe::RawHandle {
@@ -306,4 +304,32 @@ fn key_name(k: Keycode) -> Option<&'static str> {
         Keycode::Enter => "Enter",
         _ => return None,
     })
+}
+
+/// `ANativeWindow_setFrameRate` exists from Android 11 (API 30) on. It is looked up at
+/// run time so the game still starts on Android 10 phones, at their default rate.
+fn set_frame_rate(window: *mut c_void, fps: f32) {
+    extern "C" {
+        fn dlopen(name: *const std::ffi::c_char, flags: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, name: *const std::ffi::c_char) -> *mut c_void;
+    }
+    type SetFrameRate = unsafe extern "C" fn(*mut c_void, f32, i8) -> i32;
+    // SAFETY: plain libdl calls with NUL-terminated names; the symbol, when present,
+    // has the NDK signature above and `window` is a live ANativeWindow.
+    unsafe {
+        let lib = dlopen(c"libandroid.so".as_ptr(), 1);
+        if lib.is_null() {
+            return;
+        }
+        let f = dlsym(lib, c"ANativeWindow_setFrameRate".as_ptr());
+        if f.is_null() {
+            log::info!("ANativeWindow_setFrameRate not available (Android < 11)");
+            return;
+        }
+        let f: SetFrameRate = std::mem::transmute(f);
+        let r = f(window, fps, 0);
+        if r != 0 {
+            log::warn!("ANativeWindow_setFrameRate: {r}");
+        }
+    }
 }

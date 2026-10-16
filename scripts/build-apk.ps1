@@ -13,7 +13,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
-$minSdk = 30
+$minSdk = 29
 $targetSdk = 35
 $package = "com.adrianstroescu.ug2"
 

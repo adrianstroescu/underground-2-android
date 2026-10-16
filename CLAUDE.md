@@ -204,6 +204,61 @@ The traces live in `D:/GAME install/apitrace/traces/`.
   - car reflection: a 128 render-target cube map, plus a static 256 cube map.
   - The output is LDR (A8R8G8B8).
 
+### Post-processing chain (apitrace frame + speed2.exe, `tools/pc/frame_summary.py`, `tools/re/x86.py`)
+
+Targets: scene A/B/C full-size RGBA8, H1/H2/H3 half-size, M = MSAA "light" target that
+shares the scene depth. Per frame, in this order:
+
+1. World (sky, opaque, alpha, additive) into the back buffer.
+2. **Speed blur** (`0x5cc460`), only if t > 1/255:
+   - t = clamp((|camera velocity| − 25) / 100, 0, 1) + 1.1·g, at most 0.65.
+     g moves +0.2 / −0.1 per frame towards 1 while a camera flag is set (probably NOS).
+   - n = normalize(camera velocity in D3D view space: x right, y up, z forward).
+   - K = 0.0075·t·(1 + 0.5·g). Per pixel, the uv offset is
+     K·(n.z·(2u−1) − n.x, n.z·(2v−1) − n.y), with taps at 0, 1, 2 and 3 × offset, 0.25 each.
+   - A = copy of the back buffer; B = taps(A, K); A = taps(B, 4K).
+   - back = lerp(back, A, floor(t·255)/255).
+3. Cars, car shadows and glass (not blurred).
+4. **Light trails**:
+   - C *= (120, 90, 170)/255 per frame (BLENDFACTOR 0xFF785AAA, constant per frame);
+   - M = C;
+   - lamp and car-light glow sprites go into M with depth test (not into the scene!);
+   - C = resolve(M).
+5. A = back. Half-res blur of A (unused by the output, skip).
+6. **Colour grading** (ps_1_4 effects):
+   - gainmap: `samp_gainmap` 32×32, at (lum, R) and (G, B);
+   - tint: `SaturationScale` 0.4, `TintColor`;
+   - rampmap: `samp_rampmap` 1×256.
+   The LUT contents are still to be captured.
+7. **Overbright bloom**:
+   - H3 = half(B);
+   - H1 = (sat(4·(H3 − off)) · dot(sat, 0.588·(1,1,1)))², alpha 0. `OverBrightOffset` =
+     ftol(216 − 154·s)/510, which is 0.3627 in a race.
+   - 2× (H, V) blur: taps at ±1 and ±3 texels with weights 1/3 and 1/6, no centre tap.
+   - H1 += H3 · (0xB0 in race, 0xA0 in menus)/255.
+   - C += H1 · bloom/255. bloom = 10 + 62·s in a race (22 at rest), 80 in menus.
+     s ← 0.8·s + 0.2·(0.2 + 0.8·x) per frame, with x = 0 normally.
+8. Output = B + C. The HUD goes on top.
+
+### Environment parameter maps (`0x8003b600` in `L4RA.BUN`)
+
+- Each `0x8003b601` holds:
+  - `0x3b602` header: u32 name hash, bbox x0 y0 x1 y1, u32 nodes, u32 records,
+    u32 record size, u32 fields;
+  - `0x3b603` field types; `0x3b604` field offsets; `0x3b605` records;
+  - `0x3b608` quadtree: nodes of 4 × u16. A first u16 of 0 marks a leaf, whose second
+    u16 is the record. Otherwise the child is index 2·(x ≥ mid) + (y ≥ mid).
+- Names (bin_hash):
+  - Sunrise Screen Tint and Night Screen Tint: R, G, B, f3, f4, f5, f6;
+  - Normal Fog, Night Normal Fog and Night Raining Fog: f0, start, R, G, B, max, f6, f7;
+  - Fog Blend Distance (50), Horizon Fog Visibility, Rain, Wind.
+- `0x5d77f0` samples both tint maps at the camera and blends them, Night·(1−b) +
+  Sunrise·b, with b from `0x60fa80` (time of day).
+- Checked at the City Hall capture (camera −1378.65, 214.29, 11.95): all maps give
+  record 2.
+  - TintColor = (156, 160, 145)/255 × 0.2, with w = 0.19 = f6, so b = 1.
+  - Fog start is 10 and max 0.4, as captured.
+
 ### Car shading in the port
 
 - `ug2-formats/material.rs` parses the light materials. They are checked against the
