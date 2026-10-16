@@ -38,6 +38,17 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
 - Drift race on L4RC: the lap completes and scores, and the lot no longer shows white
   patches.
 
+- **Original post-processing** (2026-10-17), re-implemented from speed2.exe and an
+  apitrace frame (see `CLAUDE.md`):
+  - speed blur;
+  - gainmap, tint and rampmap colour treatment, with the tint taken per city zone from the
+    Sunrise Screen Tint map;
+  - overbright bloom;
+  - light trails: glows go to their own target, which decays per channel.
+- **Movies**: the VP6 FMVs with sound. The EA logo, the THX logo and the opening play at
+  start; a tap skips. Story scenes are not hooked to the career yet.
+- Android 10 phones start (Galaxy S9+ tested); 120 Hz is requested only where the API exists.
+
 ## Not tested on the phone yet
 
 - Street X and URL races, and drag on L4RD.
@@ -46,6 +57,20 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
 - Career moving between regions.
 
 ## Known issues and to-do
+
+0. Next big items, in order:
+   - **Original frontend (FEng)**: the 137 `.fng` screens are in
+     `FRONTEND/FrontB.lzc(.bak)`: 0x30210 = u32 hash + JDLZ package. Format notes come
+     from NFSTools/FEngLib, which has no license, so it is read as documentation only.
+     Strings are in `LANGUAGES/English.bin(.bak)` (chunk 0x39000: count, table offset,
+     string offset; (label hash, offset) pairs).
+   - The owner's PC install has mod files (Dec 2024: FrontB.lzc, GlobalB.lzc,
+     English.bin, *MemoryFile.bin). The originals are the `.bak` files; prefer them.
+   - Story scenes and tutorial / region movies at the right career moments. The FEng
+     screens IG_PlayMovie and UI_Trailers drive them.
+   - Fog per zone: the Normal Fog map is decoded (start, max and colour fields), but
+     the fog end and the ×0.745 colour factor are not found yet.
+   - Boot order of the movies to confirm on the PC (EA logo, THX, PSA?, opening).
 
 1. About 14 places in Bayview where a race's route data jumps between two roads
    through the air (e.g. the V junction in a tunnel at (362, 268)). The AI can get
