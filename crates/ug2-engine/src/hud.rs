@@ -276,6 +276,57 @@ struct Pointer {
     pos: Vec2,
 }
 
+/// What the minimap shows, in world XY metres.
+pub struct Minimap<'a> {
+    pub center: Vec2,
+    /// Car yaw (radians, 0 = +X).
+    pub heading: f32,
+    /// World metres from the centre to the rim.
+    pub range: f32,
+    pub roads: &'a [Vec<Vec2>],
+    pub route: &'a [Vec2],
+    pub cars: &'a [(Vec2, Rgba)],
+}
+
+/// What the race overlay shows.
+/// One line of the standings list.
+#[derive(Clone, Debug, Default)]
+pub struct StandingRow {
+    pub name: String,
+    /// Seconds relative to the player (negative = ahead).
+    pub gap: f32,
+    pub player: bool,
+    pub finished: bool,
+}
+
+pub fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, x) if x != 11 => "ST",
+        (2, x) if x != 12 => "ND",
+        (3, x) if x != 13 => "RD",
+        _ => "TH",
+    };
+    format!("{n}{suffix}")
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RaceHud {
+    pub standings: Vec<StandingRow>,
+    pub place: usize,
+    pub cars: usize,
+    pub lap: u32,
+    pub laps: u32,
+    pub circuit: bool,
+    /// Metres to the finish (sprints).
+    pub remaining: f32,
+    pub time: f32,
+    pub countdown: Option<f32>,
+    /// Seconds left to show "GO!" after the start.
+    pub go_flash: f32,
+    pub wrong_way: bool,
+    pub final_lap: bool,
+}
+
 /// Snapshot of what the driver is doing, for drawing the speedometer.
 #[derive(Clone, Copy, Default)]
 pub struct Telemetry {
@@ -328,17 +379,18 @@ impl Hud {
         self.dp = dp;
         let s = dp;
         let (w, h) = (width, height);
-        // Pedals bottom right with their bottoms aligned (tall GAS outside, BRAKE inside),
-        // like most mobile racers; nitro and handbrake sit above them.
+        // Layout after the target design (docs/hud-target.png): pedals bottom right with
+        // NOS above the brake pedal and the rev gauge above the gas; handbrake on the left
+        // above the steering buttons; camera, look-back and reset bottom centre.
         let mut b = vec![
             ButtonDef::pedal(Button::Gas, vec2(w - 74.0 * s, h - 98.0 * s), vec2(40.0, 70.0) * s),
             ButtonDef::pedal(Button::Brake, vec2(w - 176.0 * s, h - 74.0 * s), vec2(36.0, 46.0) * s),
-            ButtonDef::circle(Button::Nitro, vec2(w - 74.0 * s, h - 232.0 * s), 34.0 * s),
-            ButtonDef::circle(Button::Handbrake, vec2(w - 176.0 * s, h - 178.0 * s), 34.0 * s),
-            ButtonDef::circle(Button::LookBack, vec2(w - 272.0 * s, h - 150.0 * s), 28.0 * s),
-            ButtonDef::circle(Button::Pause, vec2(44.0 * s, 44.0 * s), 24.0 * s),
-            ButtonDef::circle(Button::Camera, vec2(w - 48.0 * s, 44.0 * s), 26.0 * s),
-            ButtonDef::circle(Button::Reset, vec2(w - 116.0 * s, 44.0 * s), 26.0 * s),
+            ButtonDef::circle(Button::Nitro, vec2(w - 190.0 * s, h - 194.0 * s), 30.0 * s),
+            ButtonDef::circle(Button::Handbrake, vec2(64.0 * s, h - 192.0 * s), 28.0 * s),
+            ButtonDef::circle(Button::Pause, vec2(36.0 * s, 36.0 * s), 22.0 * s),
+            ButtonDef::circle(Button::Camera, vec2(w * 0.5 - 64.0 * s, h - 30.0 * s), 22.0 * s),
+            ButtonDef::circle(Button::LookBack, vec2(w * 0.5, h - 30.0 * s), 22.0 * s),
+            ButtonDef::circle(Button::Reset, vec2(w * 0.5 + 64.0 * s, h - 30.0 * s), 22.0 * s),
         ];
         if self.steer_mode == SteerMode::Buttons {
             // Side by side, bottom left; the touch zones (1.2 x radius) meet in the middle
@@ -461,8 +513,22 @@ impl Hud {
         if show_touch {
             for b in &self.buttons {
                 let held = self.held(b.id);
-                let fill = if held { [ACCENT[0], ACCENT[1], ACCENT[2], 0.45 * o] } else { [0.0, 0.0, 0.0, 0.30 * o] };
-                let edge = [1.0, 1.0, 1.0, if held { 0.95 } else { 0.7 * o }];
+                // NOS is blue and the handbrake red, as in the target design.
+                let tint = match b.id {
+                    Button::Nitro => Some([0.15, 0.55, 1.0]),
+                    Button::Handbrake => Some([1.0, 0.2, 0.15]),
+                    _ => None,
+                };
+                let fill = match (held, tint) {
+                    (true, Some(t)) => [t[0], t[1], t[2], 0.6 * o.max(0.6)],
+                    (true, None) => [ACCENT[0], ACCENT[1], ACCENT[2], 0.45 * o],
+                    (false, Some(t)) => [t[0] * 0.3, t[1] * 0.3, t[2] * 0.3, 0.45 * o],
+                    (false, None) => [0.0, 0.0, 0.0, 0.30 * o],
+                };
+                let edge = match tint {
+                    Some(t) => [t[0], t[1], t[2], if held { 1.0 } else { 0.85 }],
+                    None => [1.0, 1.0, 1.0, if held { 0.95 } else { 0.7 * o }],
+                };
                 match b.shape {
                     Shape::Circle(r) => {
                         c.circle(b.center, r, fill);
@@ -500,34 +566,158 @@ impl Hud {
             }
         }
 
-        // Speedometer: speed, gear, rev bar and nitro bar, bottom centre.
-        let cx = w * 0.5;
-        let base_y = h - 36.0 * s;
-        let speed = format!("{:3}", t.speed_kmh.round().max(0.0) as i32);
-        c.text(cx, base_y - 44.0 * s, 6.0 * s, 0.5, &speed, WHITE);
-        c.text(cx + 62.0 * s, base_y - 14.0 * s, 1.8 * s, 0.0, "KM/H", [1.0, 1.0, 1.0, 0.8]);
+        self.gauge(c, t, vec2(w - 86.0 * s, h - 238.0 * s), 50.0 * s);
+
+        if show_fps {
+            let text = format!("{:.0} FPS  {} DC", t.fps, t.draw_calls);
+            c.text(w * 0.5, 4.0 * s, 1.3 * s, 0.5, &text, [1.0, 1.0, 1.0, 0.55]);
+        }
+    }
+
+    /// Analog rev counter with the speed and gear in the middle and a nitro arc inside.
+    fn gauge(&self, c: &mut Canvas, t: &Telemetry, center: Vec2, r: f32) {
+        let s = self.dp;
+        let (a0, a1) = (std::f32::consts::PI * 0.75, std::f32::consts::PI * 2.25);
+        let at = |f: f32| a0 + (a1 - a0) * f.clamp(0.0, 1.0);
+        let dir = |a: f32| vec2(a.cos(), a.sin());
+        c.circle(center, r, [0.0, 0.02, 0.05, 0.6]);
+        c.arc(center, r - 3.0 * s, 3.0 * s, a0, at(0.85), [ACCENT[0], ACCENT[1], ACCENT[2], 0.9]);
+        c.arc(center, r - 3.0 * s, 3.0 * s, at(0.85), a1, [1.0, 0.2, 0.15, 1.0]);
+        for k in 0..=8 {
+            let f = k as f32 / 8.0;
+            let d = dir(at(f));
+            c.line(center + d * (r - 10.0 * s), center + d * (r - 5.0 * s), 2.0 * s, WHITE);
+            let label = k.to_string();
+            let p = center + d * (r - 17.0 * s);
+            c.text(p.x, p.y - 3.5 * s, 1.0 * s, 0.5, &label, [1.0, 1.0, 1.0, 0.75]);
+        }
+        // Nitro left: inner arc.
+        c.arc(center, r - 24.0 * s, 2.5 * s, a0, a1, [1.0, 1.0, 1.0, 0.12]);
+        if t.nitro > 0.0 {
+            c.arc(center, r - 24.0 * s, 2.5 * s, a0, at(t.nitro), [0.2, 0.6, 1.0, 0.95]);
+        }
+        let rpm = t.rpm.clamp(0.0, 1.0);
+        let d = dir(at(rpm));
+        c.line(center - d * 6.0 * s, center + d * (r - 8.0 * s), 3.0 * s, [1.0, 0.35, 0.15, 1.0]);
+        c.circle(center, 4.0 * s, [1.0, 0.35, 0.15, 1.0]);
+        let speed = format!("{}", t.speed_kmh.round().max(0.0) as i32);
+        c.text(center.x, center.y + 12.0 * s, 3.2 * s, 0.5, &speed, WHITE);
+        c.text(center.x, center.y + 37.0 * s, 1.2 * s, 0.5, "KM/H", [1.0, 1.0, 1.0, 0.75]);
         let gear = match t.gear {
             -1 => "R".to_string(),
             0 => "N".to_string(),
             g => g.to_string(),
         };
-        c.text(cx - 76.0 * s, base_y - 34.0 * s, 4.0 * s, 0.5, &gear, ACCENT);
-        let bar_w = 180.0 * s;
-        let bx = cx - bar_w * 0.5;
-        c.rect(bx, base_y + 2.0 * s, bar_w, 6.0 * s, [0.0, 0.0, 0.0, 0.5]);
-        let rpm = t.rpm.clamp(0.0, 1.0);
-        let rpm_col = if rpm > 0.9 { [1.0, 0.25, 0.2, 1.0] } else { ACCENT };
-        c.rect(bx, base_y + 2.0 * s, bar_w * rpm, 6.0 * s, rpm_col);
-        c.rect(bx, base_y + 11.0 * s, bar_w, 4.0 * s, [0.0, 0.0, 0.0, 0.5]);
-        c.rect(bx, base_y + 11.0 * s, bar_w * t.nitro.clamp(0.0, 1.0), 4.0 * s, [0.3, 1.0, 0.4, 1.0]);
+        let gx = center.x - r - 16.0 * s;
+        c.rect(gx - 11.0 * s, center.y + 10.0 * s, 22.0 * s, 28.0 * s, [0.0, 0.0, 0.0, 0.55]);
+        c.text(gx, center.y + 13.0 * s, 3.0 * s, 0.5, &gear, ACCENT);
+    }
 
-        if show_fps {
-            let text = format!("{:.0} FPS  {} DC", t.fps, t.draw_calls);
-            c.text(80.0 * s, 36.0 * s, 1.6 * s, 0.0, &text, [1.0, 1.0, 1.0, 0.7]);
+    /// Circular heading-up minimap, top left: roads, the race route, other racers.
+    pub fn minimap(&self, c: &mut Canvas, m: &Minimap) {
+        let s = self.dp;
+        let r = 48.0 * s;
+        let center = vec2(16.0 * s + r, 66.0 * s + r);
+        let scale = r / m.range;
+        let (sin, cos) = (m.heading.sin(), m.heading.cos());
+        // World XY -> minimap pixels, with the car's heading pointing up.
+        let to_map = |p: Vec2| {
+            let d = p - m.center;
+            let fwd = d.x * cos + d.y * sin;
+            let left = -d.x * sin + d.y * cos;
+            center + vec2(-left, -fwd) * scale
+        };
+        let inside = |p: Vec2| p.distance(center) < r - 2.0 * s;
+        c.circle(center, r, [0.02, 0.04, 0.08, 0.72]);
+        let seg = |c: &mut Canvas, a: Vec2, b: Vec2, w: f32, col: Rgba| {
+            let (pa, pb) = (to_map(a), to_map(b));
+            if inside(pa) && inside(pb) {
+                c.line(pa, pb, w, col);
+            }
+        };
+        for road in m.roads {
+            for w in road.windows(2) {
+                seg(c, w[0], w[1], 3.0 * s, [0.55, 0.62, 0.72, 0.55]);
+            }
+        }
+        if m.route.len() > 1 {
+            for w in m.route.windows(2) {
+                seg(c, w[0], w[1], 4.5 * s, [1.0, 0.7, 0.1, 0.95]);
+            }
+        }
+        for &(p, col) in m.cars {
+            let q = to_map(p);
+            if inside(q) {
+                c.circle(q, 4.0 * s, col);
+            }
+        }
+        c.ring(center, r, 2.5 * s, [ACCENT[0], ACCENT[1], ACCENT[2], 0.8]);
+        // North marker on the rim.
+        let north = to_map(m.center + vec2(0.0, 1.0) * m.range * 10.0);
+        let dir = (north - center).normalize_or_zero();
+        c.text(center.x + dir.x * (r - 9.0 * s), center.y + dir.y * (r - 9.0 * s) - 5.0 * s, 1.4 * s, 0.5, "N", WHITE);
+        // The player: an arrow pointing up.
+        let a = 9.0 * s;
+        c.triangle(center + vec2(0.0, -a), center + vec2(a * 0.7, a * 0.7), center + vec2(-a * 0.7, a * 0.7), [0.3, 1.0, 0.45, 1.0]);
+    }
+
+    /// Race information: place, lap and time at the top, countdown and warnings centred.
+    pub fn race_overlay(&self, c: &mut Canvas, r: &RaceHud) {
+        let s = self.dp;
+        let w = self.size.x;
+        // Lap (or distance left) and time, top left next to the pause button.
+        let (x, y) = (66.0 * s, 12.0 * s);
+        c.rect(x, y, 128.0 * s, 44.0 * s, [0.0, 0.0, 0.0, 0.5]);
+        c.rect(x, y, 3.0 * s, 44.0 * s, ACCENT);
+        let first = if r.circuit {
+            format!("LAP  {}/{}", r.lap, r.laps)
+        } else {
+            format!("LEFT {:.1} KM", (r.remaining / 1000.0).max(0.0))
+        };
+        c.text(x + 10.0 * s, y + 6.0 * s, 1.9 * s, 0.0, &first, ACCENT);
+        let time = format!("TIME {}", crate::race::format_time(r.time));
+        c.text(x + 10.0 * s, y + 25.0 * s, 1.9 * s, 0.0, &time, WHITE);
+
+        // Place and standings, top right.
+        let right = w - 12.0 * s;
+        let place = ordinal(r.place);
+        let size = 4.0 * s;
+        let total = format!("/{}", r.cars);
+        let pw = Canvas::text_width(&place, size) + Canvas::text_width(&total, 2.2 * s) + 6.0 * s;
+        c.text(right - pw, 8.0 * s, size, 0.0, &place, WHITE);
+        c.text(right - Canvas::text_width(&total, 2.2 * s), 18.0 * s, 2.2 * s, 0.0, &total, [1.0, 1.0, 1.0, 0.8]);
+        let row_h = 13.0 * s;
+        let list_w = 150.0 * s;
+        for (i, st) in r.standings.iter().enumerate().take(6) {
+            let ry = 42.0 * s + i as f32 * row_h;
+            let bg = if st.player { [0.1, 0.35, 0.9, 0.75] } else { [0.0, 0.0, 0.0, 0.45] };
+            c.rect(right - list_w, ry, list_w, row_h - 2.0 * s, bg);
+            let name = format!("{} {}", i + 1, st.name);
+            c.text(right - list_w + 5.0 * s, ry + 2.0 * s, 1.3 * s, 0.0, &name, WHITE);
+            let gap = if st.player {
+                "---".to_string()
+            } else if st.finished {
+                "FIN".to_string()
+            } else {
+                format!("{:+.1}", st.gap)
+            };
+            c.text(right - 5.0 * s, ry + 2.0 * s, 1.3 * s, 1.0, &gap, [1.0, 1.0, 1.0, 0.85]);
+        }
+        if let Some(t) = r.countdown {
+            let text = if t > 3.0 { "" } else if t > 2.0 { "3" } else if t > 1.0 { "2" } else if t > 0.0 { "1" } else { "GO!" };
+            c.text(w * 0.5, self.size.y * 0.32, 12.0 * s, 0.5, text, ACCENT);
+        } else if r.go_flash > 0.0 {
+            c.text(w * 0.5, self.size.y * 0.32, 12.0 * s, 0.5, "GO!", [ACCENT[0], ACCENT[1], ACCENT[2], r.go_flash.min(1.0)]);
+        }
+        if r.wrong_way {
+            c.text(w * 0.5, self.size.y * 0.42, 4.0 * s, 0.5, "WRONG WAY", [1.0, 0.25, 0.2, 1.0]);
+        }
+        if r.final_lap {
+            c.text(w * 0.5, 60.0 * s, 2.2 * s, 0.5, "FINAL LAP", [1.0, 0.8, 0.2, 1.0]);
         }
     }
 
-    /// Centered message box (loading, errors, pause).
+    /// Centered message box (loading, errors).
     pub fn message(&self, c: &mut Canvas, lines: &[&str]) {
         let s = self.dp;
         let longest = lines.iter().map(|l| Canvas::text_width(l, 1.0)).fold(1.0, f32::max);

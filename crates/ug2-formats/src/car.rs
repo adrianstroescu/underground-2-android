@@ -46,6 +46,71 @@ pub fn stock_parts(car: &str) -> Vec<(String, PartKind)> {
     v
 }
 
+/// Visual parts fitted to a racer; 0 means stock everywhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PartSet {
+    /// Body kit 1..29: front and rear bumper and side skirts.
+    pub kit: u8,
+    /// Widebody 1..4: body, doors, door panels and sills.
+    pub widebody: u8,
+    /// Hood style 1..28 (21..25 come in left and right halves).
+    pub hood: u8,
+    /// Headlight and brake-light style 1..14.
+    pub lights: u8,
+}
+
+impl PartSet {
+    pub fn is_stock(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Short key used to tell loaded models apart, e.g. "K03W00H05L02".
+    pub fn key(&self) -> String {
+        format!("K{:02}W{:02}H{:02}L{:02}", self.kit, self.widebody, self.hood, self.lights)
+    }
+}
+
+/// Parts of a racer with `parts` fitted: for each part, candidate full names (LOD A) in
+/// order of preference; the first one the car has is used, so missing styles fall back
+/// to stock.
+pub fn fitted_parts(car: &str, parts: &PartSet) -> Vec<(Vec<String>, PartKind)> {
+    let stock = |slot: &str| format!("{car}_KIT00_{slot}_A");
+    let mut v = vec![(vec![format!("{car}_BASE_A")], PartKind::Body)];
+    for slot in KIT_SLOTS {
+        let mut c = Vec::new();
+        match *slot {
+            "FRONT_BUMPER" | "REAR_BUMPER" | "SKIRT" if parts.kit > 0 => {
+                c.push(format!("{car}_KIT{:02}_{slot}_A", parts.kit));
+            }
+            "BODY" | "DOOR_LEFT" | "DOOR_RIGHT" | "DOOR_PANEL_LEFT" | "DOOR_PANEL_RIGHT" | "DOOR_SILL_LEFT"
+            | "DOOR_SILL_RIGHT"
+                if parts.widebody > 0 =>
+            {
+                c.push(format!("{car}_KITW{:02}_{slot}_A", parts.widebody));
+            }
+            "HEADLIGHT_LEFT" | "HEADLIGHT_RIGHT" | "BRAKELIGHT" if parts.lights > 0 => {
+                c.push(format!("{car}_STYLE{:02}_{slot}_A", parts.lights));
+            }
+            "HOOD" if parts.hood > 0 => {
+                if (21..=25).contains(&parts.hood) {
+                    // Split hoods: the right half is its own part.
+                    v.push((vec![format!("{car}_STYLE{:02}_HOOD_RIGHT_A", parts.hood)], PartKind::Body));
+                    c.push(format!("{car}_STYLE{:02}_HOOD_LEFT_A", parts.hood));
+                } else {
+                    c.push(format!("{car}_STYLE{:02}_HOOD_A", parts.hood));
+                }
+            }
+            _ => {}
+        }
+        c.push(stock(slot));
+        v.push((c, PartKind::Body));
+    }
+    v.push((vec![stock("FRONT_WHEEL")], PartKind::FrontWheel));
+    v.push((vec![stock("FRONT_BRAKE")], PartKind::FrontBrake));
+    v.push((vec![stock("REAR_BRAKE")], PartKind::RearBrake));
+    v
+}
+
 /// (hash, kind) pairs for [`stock_parts`].
 pub fn stock_part_hashes(car: &str) -> Vec<(u32, PartKind)> {
     stock_parts(car).into_iter().map(|(n, k)| (bin_hash(&n), k)).collect()
@@ -70,27 +135,32 @@ pub enum Material {
 
 /// Texture names that car parts reference but no texture pack contains: the game swaps
 /// them for the car's own light textures, the shared window texture or the paint skin.
-/// Returns `(referenced hash, replacement texture hash, material)`; the replacement is
-/// `None` for paint. Traffic skins (`<CAR>_SKIN1` in CARS/TEXTURES.BIN) are real
-/// textures, so callers should only treat the skin as paint when it is missing.
-pub fn runtime_materials(car: &str) -> Vec<(u32, Option<u32>, Material)> {
+/// Returns `(referenced hash, replacement candidates, material)`: the first candidate the
+/// car has wins (light styles fall back to stock); no candidates means paint. Traffic
+/// skins (`<CAR>_SKIN1` in CARS/TEXTURES.BIN) are real textures, so callers should only
+/// treat the skin as paint when it is missing. `lights` is the light style (0 = stock).
+pub fn runtime_materials(car: &str, lights: u8) -> Vec<(u32, Vec<u32>, Material)> {
     let h = |s: &str| bin_hash(s);
     let mut v = Vec::new();
     for w in ["WINDOW_FRONT", "WINDOW_REAR", "WINDOW_LEFT_FRONT", "WINDOW_LEFT_REAR", "WINDOW_RIGHT_FRONT", "WINDOW_RIGHT_REAR"] {
-        v.push((h(w), Some(h("WINDOW")), Material::Window));
+        v.push((h(w), vec![h("WINDOW")], Material::Window));
     }
-    let light = |v: &mut Vec<_>, generic: &str, tex: String, m: Material| v.push((h(generic), Some(h(&tex)), m));
+    let style = if lights > 0 { format!("STYLE{lights:02}") } else { "KIT00".to_string() };
+    let light = |v: &mut Vec<_>, generic: &str, part: &str, m: Material| {
+        let tex = [format!("{car}_{style}_{part}"), format!("{car}_KIT00_{part}")];
+        v.push((h(generic), tex.iter().map(|t| h(t)).collect(), m));
+    };
     for side in ["LEFT", "RIGHT"] {
-        light(&mut v, &format!("HEADLIGHT_{side}"), format!("{car}_KIT00_HEADLIGHT_OFF"), Material::Headlight);
-        light(&mut v, &format!("HEADLIGHT_GLASS_{side}"), format!("{car}_KIT00_HEADLIGHT_GLASS_OFF"), Material::HeadlightGlass);
-        light(&mut v, &format!("BRAKELIGHT_{side}"), format!("{car}_KIT00_BRAKELIGHT_OFF"), Material::Brakelight);
-        light(&mut v, &format!("BRAKELIGHT_GLASS_{side}"), format!("{car}_KIT00_BRAKELIGHT_GLASS_OFF"), Material::BrakelightGlass);
+        light(&mut v, &format!("HEADLIGHT_{side}"), "HEADLIGHT_OFF", Material::Headlight);
+        light(&mut v, &format!("HEADLIGHT_GLASS_{side}"), "HEADLIGHT_GLASS_OFF", Material::HeadlightGlass);
+        light(&mut v, &format!("BRAKELIGHT_{side}"), "BRAKELIGHT_OFF", Material::Brakelight);
+        light(&mut v, &format!("BRAKELIGHT_GLASS_{side}"), "BRAKELIGHT_GLASS_OFF", Material::BrakelightGlass);
     }
-    light(&mut v, "BRAKELIGHT_CENTRE", format!("{car}_CENTRE_BRAKELIGHT_OFF"), Material::Brakelight);
-    v.push((h(&format!("{car}_SKIN1")), None, Material::Paint));
-    v.push((h("CARSKIN_CARBONFIBRE"), None, Material::Paint));
+    v.push((h("BRAKELIGHT_CENTRE"), vec![h(&format!("{car}_CENTRE_BRAKELIGHT_OFF"))], Material::Brakelight));
+    v.push((h(&format!("{car}_SKIN1")), Vec::new(), Material::Paint));
+    v.push((h("CARSKIN_CARBONFIBRE"), Vec::new(), Material::Paint));
     // Body-colour swatch on every panel; its name is unknown but the role is clear.
-    v.push((0x3C84_D757, None, Material::Paint));
+    v.push((0x3C84_D757, Vec::new(), Material::Paint));
     v
 }
 
@@ -100,7 +170,7 @@ mod tests {
 
     #[test]
     fn runtime_material_hashes_match_the_game() {
-        let m = runtime_materials("350Z");
+        let m = runtime_materials("350Z", 0);
         let find = |h: u32| m.iter().find(|e| e.0 == h).map(|e| e.2);
         // Hashes referenced by 350Z_KIT00_* parts.
         assert_eq!(find(0x7B22_0DDF), Some(Material::Window));
@@ -109,5 +179,18 @@ mod tests {
         assert_eq!(find(0x3617_DCFC), Some(Material::Brakelight));
         assert_eq!(find(0xA675_4656), Some(Material::Paint));
         assert_eq!(bin_hash("350Z_KIT00_HEADLIGHT_OFF"), 0xF7C9_D5DB);
+    }
+
+    #[test]
+    fn fitted_parts_exist_in_the_game() {
+        let game = crate::fs::GameDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."));
+        let Ok(geo) = game.read("CARS/350Z/GEOMETRY.BIN") else { return };
+        let solids: Vec<u32> =
+            crate::solid::find_solid_lists(&geo).into_iter().flat_map(|l| l.solids).map(|s| s.hash).collect();
+        let parts = PartSet { kit: 3, widebody: 1, hood: 22, lights: 5 };
+        for (names, _) in fitted_parts("350Z", &parts) {
+            // The preferred (first) candidate should exist for every fitted style.
+            assert!(solids.contains(&bin_hash(&names[0])), "missing {}", names[0]);
+        }
     }
 }

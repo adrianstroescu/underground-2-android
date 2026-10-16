@@ -1,16 +1,24 @@
 //! Need for Speed: Underground 2, reimplemented natively. Platform layers (desktop,
 //! Android) create a window/surface, forward raw input and call [`Game::frame`].
 
+pub mod ai;
 pub mod assets;
 pub mod camera;
+pub mod career;
 pub mod cars;
 pub mod collision;
 pub mod config;
 pub mod font;
+mod frontend;
 pub mod hud;
 pub mod input;
 pub mod menu;
+pub mod play;
+pub mod post;
+pub mod race;
 pub mod render;
+pub mod roads;
+pub mod traffic;
 pub mod vehicle;
 
 pub use ug2_audio::{music, sound};
@@ -21,21 +29,26 @@ use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glam::{vec2, Mat4, Quat, Vec3};
+use glam::{vec2, Mat4, Vec3};
 use ug2_formats::bin_hash;
 use ug2_formats::carinfo::WheelInfo;
 use ug2_formats::fs::GameDir;
 
 use crate::assets::{spawn_loader, GpuVertex, LoadEvent, LoadRequest, Loader, LoaderConfig};
 use crate::camera::ChaseCamera;
-use crate::cars::{display_name, CarModel};
+use crate::career::Career;
+use crate::cars::{car_name, display_name, model_key, CarModel};
 use crate::collision::CollisionWorld;
-use crate::config::{GameConfig, SteerMode};
-use crate::hud::{Canvas, Hud, Telemetry};
+use crate::config::GameConfig;
+use crate::frontend::{PendingRace, QuickRace, Screen};
+use crate::hud::{Canvas, Hud, RaceHud, StandingRow, Telemetry};
 use crate::input::{Action, Controls, InputMap, InputState, RawInput, TouchPhase};
-use crate::menu::{Menu, MenuHit, MenuItem};
+use crate::menu::Menu;
 use crate::music::Music;
+use crate::play::{wheel_transforms, ModelPhysics, Session};
+use crate::race::RacePhase;
 use crate::render::{CarDraw, FrameData, Gpu, Renderer};
+use crate::roads::RoadData;
 use crate::sound::{EngineSound, Sound, SoundState};
 use crate::vehicle::Vehicle;
 
@@ -56,8 +69,8 @@ struct ModelInfo {
     brakelights: Vec<Vec3>,
     /// Front of the body (car-space X), for the headlight pool on the road.
     front: f32,
-    ride_height: f32,
-    wheelbase: f32,
+    skins: Vec<u32>,
+    physics: ModelPhysics,
 }
 
 impl ModelInfo {
@@ -68,13 +81,18 @@ impl ModelInfo {
             headlights: m.headlights.clone(),
             brakelights: m.brakelights.clone(),
             front: m.bbox_max.x,
-            ride_height: m.ride_height(),
-            wheelbase: m.wheelbase(),
+            skins: m.skins.clone(),
+            physics: ModelPhysics {
+                ride_height: m.ride_height(),
+                wheelbase: m.wheelbase(),
+                wheel_radius: m.wheels[0].radius,
+                skins: m.skins.len(),
+            },
         }
     }
 }
 
-/// Paint colours offered in the pause menu.
+/// Paint colours offered in the menus.
 const PAINTS: &[(&str, [f32; 3])] = &[
     ("ORANGE", [0.85, 0.32, 0.05]),
     ("RED", [0.72, 0.04, 0.04]),
@@ -101,19 +119,40 @@ pub struct Game {
     world_loading: bool,
     status: Status,
     world: Option<CollisionWorld>,
+    roads: Option<RoadData>,
+    lights: Vec<ug2_formats::light::WorldLight>,
     vehicle: Vehicle,
     models: HashMap<String, ModelInfo>,
+    physics: HashMap<String, ModelPhysics>,
     racers: Vec<String>,
+    traffic_names: Vec<String>,
+    /// Stock performance per car from its real data.
+    base_perfs: HashMap<String, vehicle::Perf>,
+    requested: Vec<String>,
     /// Model the player drives (key into `models`) and the one being loaded.
     player_car: Option<String>,
     pending_car: Option<String>,
     spawned: bool,
+    session: Session,
+    screen: Screen,
+    menu: Menu,
+    quick: QuickRace,
+    pending_race: Option<PendingRace>,
+    career: Option<Career>,
+    /// The menus are in the career branch (garage shows the shop and upgrades).
+    in_career: bool,
+    career_path: PathBuf,
+    /// Prize for the race in progress (career only) and whether it has been paid.
+    race_prize: Option<(String, u32)>,
+    prize_paid: Option<u32>,
+    /// Seconds since the race result came in (results screen delay).
+    finish_timer: f32,
     camera: ChaseCamera,
+    title_time: f32,
     input: InputState,
     hud: Hud,
     canvas: Canvas,
     paused: bool,
-    pause_menu: Menu,
     glows: Vec<GpuVertex>,
     brake_light: f32,
     sound: Sound,
@@ -144,7 +183,12 @@ impl Game {
 
         let game_dir = GameDir::new(data_dir);
         let (status, loader) = if game_dir.is_valid() {
-            let lc = LoaderConfig { car: cfg.car.clone(), location: cfg.location.clone(), bc_textures: gpu.bc_textures };
+            let lc = LoaderConfig {
+                car: cfg.car.clone(),
+                parts: cfg.parts_for(&cfg.car),
+                location: cfg.location.clone(),
+                bc_textures: gpu.bc_textures,
+            };
             (Status::Loading("STARTING".into()), Some(spawn_loader(game_dir, lc)))
         } else {
             (Status::MissingData(data_dir.to_path_buf()), None)
@@ -156,6 +200,8 @@ impl Game {
             let ring = m.ring.clone();
             sound.with(|mx| mx.set_music(ring));
         }
+        let mut session = Session::new(14);
+        session.traffic_on = cfg.traffic;
         Self {
             gpu,
             surface: None,
@@ -165,18 +211,35 @@ impl Game {
             loader,
             status,
             world: None,
+            roads: None,
+            lights: Vec::new(),
             vehicle: Vehicle::new(Vec3::ZERO, 0.0, 0.16, 2.6),
             models: HashMap::new(),
+            physics: HashMap::new(),
             racers: Vec::new(),
+            traffic_names: Vec::new(),
+            base_perfs: HashMap::new(),
+            requested: Vec::new(),
             player_car: None,
-            pending_car: Some(cfg.car.clone()),
+            pending_car: Some(model_key(&cfg.car, &cfg.parts_for(&cfg.car))),
             spawned: false,
+            session,
+            screen: Screen::Title,
+            menu: Menu::default(),
+            quick: QuickRace::default(),
+            pending_race: None,
+            career: None,
+            in_career: false,
+            career_path: config_dir.join("career.cfg"),
+            race_prize: None,
+            prize_paid: None,
+            finish_timer: 0.0,
             camera: ChaseCamera::new(),
+            title_time: 0.0,
             input,
             hud,
             canvas: Canvas::default(),
             paused: false,
-            pause_menu: Menu::new("PAUSED", Vec::new()),
             glows: Vec::new(),
             brake_light: 0.0,
             sound,
@@ -231,10 +294,10 @@ impl Game {
 
     pub fn handle_input(&mut self, ev: RawInput) {
         if let RawInput::Touch { id, phase, x, y } = ev {
-            if self.paused {
+            if self.menu_visible() {
                 if phase == TouchPhase::Down {
-                    if let Some(hit) = self.pause_menu.hit(vec2(x, y)) {
-                        self.pause_action(hit);
+                    if let Some(hit) = self.menu.hit(vec2(x, y)) {
+                        self.menu_action(hit);
                     }
                 }
                 return;
@@ -248,73 +311,68 @@ impl Game {
     fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         if paused {
-            self.pause_menu.selected = 0;
+            self.menu.selected = 0;
         }
     }
 
-    fn pause_action(&mut self, hit: MenuHit) {
-        let step = |h: MenuHit| match h {
-            MenuHit::Prev(_) => -1,
-            _ => 1,
-        };
-        let (MenuHit::Activate(i) | MenuHit::Prev(i) | MenuHit::Next(i)) = hit;
-        match i {
-            0 => self.set_paused(false),
-            1 if !self.racers.is_empty() => {
-                let current = self.pending_car.as_ref().or(self.player_car.as_ref()).cloned().unwrap_or_default();
-                let at = self.racers.iter().position(|r| *r == current).unwrap_or(0) as i32;
-                let next = self.racers[(at + step(hit)).rem_euclid(self.racers.len() as i32) as usize].clone();
-                self.cfg.car = next.clone();
-                self.cfg.save(&self.config_path);
-                self.select_car(next);
-            }
-            2 => {
-                let at = PAINTS.iter().position(|(_, c)| *c == self.cfg.paint).unwrap_or(0) as i32;
-                self.cfg.paint = PAINTS[(at + step(hit)).rem_euclid(PAINTS.len() as i32) as usize].1;
-                self.cfg.save(&self.config_path);
-            }
-            3 => {
-                self.cfg.steer_mode = match self.cfg.steer_mode {
-                    SteerMode::Buttons => SteerMode::Joystick,
-                    SteerMode::Joystick => SteerMode::Buttons,
-                };
-                self.hud.steer_mode = self.cfg.steer_mode;
-                self.hud.layout(self.size.0 as f32, self.size.1 as f32, self.dp);
-                self.cfg.save(&self.config_path);
-            }
-            4 => {
-                self.vehicle.reset_to_safe();
-                self.camera.snap(&self.vehicle);
-                self.set_paused(false);
-            }
-            _ => {}
-        }
-    }
-
-    /// Switches the player's car, loading the model first if needed.
+    /// Switches the player's car (with its saved visual parts), loading it if needed.
     fn select_car(&mut self, name: String) {
-        if self.models.contains_key(&name) {
+        let parts = self.cfg.parts_for(&name);
+        let key = model_key(&name, &parts);
+        if self.models.contains_key(&key) {
             self.pending_car = None;
-            self.use_car(&name);
+            self.use_car(&key);
         } else {
-            if let Some(l) = &self.loader {
-                l.request(LoadRequest::Car(name.clone()));
-            }
-            self.pending_car = Some(name);
+            self.request_parts(&name, parts);
+            self.pending_car = Some(key);
         }
     }
 
-    fn use_car(&mut self, name: &str) {
-        let Some(m) = self.models.get(name) else { return };
-        self.vehicle.ride_height = m.ride_height;
-        self.vehicle.wheelbase = m.wheelbase;
+    /// Loads a stock model (opponents, traffic).
+    fn request_model(&mut self, name: &str) {
+        self.request_parts(name, Default::default());
+    }
+
+    fn request_parts(&mut self, name: &str, parts: ug2_formats::car::PartSet) {
+        let key = model_key(name, &parts);
+        if self.models.contains_key(&key) || self.requested.iter().any(|r| *r == key) {
+            return;
+        }
+        if let Some(l) = &self.loader {
+            l.request(LoadRequest::Car { name: name.to_string(), parts });
+            self.requested.push(key);
+        }
+    }
+
+    /// Makes the loaded model `key` the player's car.
+    fn use_car(&mut self, key: &str) {
+        let name = car_name(key).to_string();
+        let name = name.as_str();
+        let Some(m) = self.models.get(key) else { return };
+        self.vehicle.ride_height = m.physics.ride_height;
+        self.vehicle.wheelbase = m.physics.wheelbase;
+        self.vehicle.perf = self.perf_for(name);
         if self.spawned {
             let (pos, yaw) = (self.vehicle.pos, self.vehicle.yaw);
             self.vehicle.reset(pos + Vec3::Z * 0.3, yaw);
         }
-        self.player_car = Some(name.to_string());
+        self.player_car = Some(key.to_string());
         if let Some(e) = self.engine_sounds.get(name).cloned() {
             self.sound.with(|m| m.set_engine(&e));
+        }
+    }
+
+    /// Stock performance of `car`.
+    fn base_perf(&self, car: &str) -> vehicle::Perf {
+        self.base_perfs.get(car).copied().unwrap_or_else(|| cars::base_perf(car))
+    }
+
+    /// Performance of the player's `car`: upgraded in the career, stock otherwise.
+    fn perf_for(&self, car: &str) -> vehicle::Perf {
+        let base = self.base_perf(car);
+        match &self.career {
+            Some(c) if c.owned.iter().any(|o| o == car) => c.perf(car, base),
+            _ => base,
         }
     }
 
@@ -360,21 +418,30 @@ impl Game {
                         self.renderer.upload_texture(&self.gpu, t);
                     }
                 }
-                LoadEvent::CarList { racers, traffic } => {
-                    log::info!("{} racers, {} traffic cars", racers.len(), traffic.len());
+                LoadEvent::CarList { racers, traffic, perfs } => {
+                    log::info!("{} racers, {} traffic cars, {} with performance data", racers.len(), traffic.len(), perfs.len());
+                    self.base_perfs = perfs.into_iter().collect();
                     self.racers = racers;
+                    self.traffic_names = traffic.clone();
+                    for t in &traffic {
+                        self.request_model(t);
+                    }
                 }
                 LoadEvent::Car(car) => {
-                    let name = car.name.clone();
+                    let key = model_key(&car.name, &car.parts);
                     if let Some(id) = self.renderer.add_car_model(&self.gpu, &car) {
-                        self.models.insert(name.clone(), ModelInfo::new(id, &car));
+                        let info = ModelInfo::new(id, &car);
+                        self.physics.insert(key.clone(), info.physics);
+                        self.models.insert(key.clone(), info);
                     }
-                    if self.pending_car.as_deref() == Some(name.as_str()) {
+                    self.requested.retain(|r| *r != key);
+                    if self.pending_car.as_deref() == Some(key.as_str()) {
                         self.pending_car = None;
-                        self.use_car(&name);
+                        self.use_car(&key);
                     }
                 }
                 LoadEvent::CarFailed(name) => {
+                    self.requested.retain(|r| *r != name);
                     if self.pending_car.as_deref() == Some(name.as_str()) {
                         self.pending_car = None;
                     }
@@ -389,12 +456,13 @@ impl Game {
                     }
                     self.engine_sounds.insert(car, sound);
                 }
+                LoadEvent::Roads(r) => self.roads = Some(*r),
                 LoadEvent::Collision(c) => self.world = Some(c),
+                LoadEvent::Lights(l) => self.lights = l,
                 LoadEvent::Spawn { pos, yaw } => {
                     self.vehicle.reset(pos, yaw);
                     self.camera.snap(&self.vehicle);
                     self.spawned = true;
-                    // Playable as soon as the car and the road exist.
                     self.status = Status::Ready;
                 }
                 LoadEvent::Section(s) => self.renderer.add_section(&self.gpu, &s.mesh, s.sky),
@@ -426,83 +494,190 @@ impl Game {
             self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
         }
         self.pump_loader(Duration::from_millis(12));
+        self.try_start_pending_race();
 
         let mut triggers = self.input.take_triggers();
         triggers.extend(self.hud.take_triggers());
         for t in triggers {
             match t {
                 Action::Camera => self.camera.next_mode(),
-                Action::Reset => {
-                    self.vehicle.reset_to_safe();
-                    self.camera.snap(&self.vehicle);
-                }
-                Action::Pause => self.set_paused(!self.paused),
+                Action::Reset => self.reset_player(),
+                Action::Pause => self.back_pressed(),
                 _ => {}
             }
         }
 
-        let controls = self.controls();
-        if self.paused || !self.spawned {
-            let rpm = self.vehicle.rpm;
-            self.sound.with(|m| m.set_state(SoundState { rpm, ..Default::default() }));
+        let playing = self.screen == Screen::Playing && !self.paused && self.spawned;
+        let mut controls = if playing { self.controls() } else { Controls::default() };
+        let countdown = matches!(self.session.race().map(|r| r.phase), Some(RacePhase::Countdown(_)));
+        let finished = matches!(self.session.race().map(|r| r.phase), Some(RacePhase::Finished));
+        if countdown {
+            // Rev on the line, but stay put.
+            controls = Controls { throttle: controls.throttle, brake: 1.0, ..Controls::default() };
+        } else if finished {
+            controls = Controls { brake: 0.4, ..Controls::default() };
         }
-        if !self.paused && self.spawned {
+        let simulate = self.spawned && !self.paused && self.screen != Screen::Title;
+        if simulate {
+            let traffic_models: Vec<(String, f32, f32, usize, vehicle::Perf)> = self
+                .traffic_names
+                .iter()
+                .filter_map(|n| self.physics.get(n).map(|p| (n.clone(), p.ride_height, p.wheelbase, p.skins, self.base_perf(n))))
+                .collect();
+            self.session.plan(dt, &self.vehicle, self.roads.as_ref(), &traffic_models);
             self.acc += dt;
             let mut steps = 0;
             while self.acc >= STEP && steps < 12 {
                 self.vehicle.step(&controls, self.world.as_ref(), STEP);
+                self.session.step(&mut self.vehicle, self.world.as_ref(), STEP);
                 self.acc -= STEP;
                 steps += 1;
             }
             if steps == 12 {
                 self.acc = 0.0;
             }
-            let radius = self.player_model().map_or(0.33, |m| m.wheels[0].radius);
+            self.session.animate(&self.physics, dt);
+        }
+        if self.spawned {
+            let radius = self.player_model().map_or(0.33, |m| m.physics.wheel_radius);
             self.vehicle.advance_wheels(radius, dt);
             self.camera.update(&self.vehicle, controls.look_back, self.world.as_ref(), dt);
-            let v = &mut self.vehicle;
-            let shifted_up = v.gear > self.last_gear && self.last_gear > 0;
-            self.last_gear = v.gear;
-            let impact = std::mem::take(&mut v.impact);
-            let skid = ((v.slip - 2.5) / 6.0).clamp(0.0, 1.0)
-                + if controls.handbrake { (v.speed().abs() / 20.0).min(1.0) * 0.6 } else { 0.0 };
-            let state = SoundState {
-                rpm: v.rpm,
-                throttle: controls.throttle,
-                speed: v.speed().abs(),
-                nitro: controls.nitro && v.nitro > 0.0 && controls.throttle > 0.1,
-                skid: skid.min(1.0),
-                active: true,
-            };
-            self.sound.with(|m| {
-                m.set_state(state);
-                if shifted_up {
-                    m.shift();
-                }
-                if impact > 3.0 {
-                    m.impact(((impact - 3.0) / 15.0).min(1.0));
-                }
-            });
-            let braking = controls.brake > 0.05 && self.vehicle.speed() > 0.5;
-            let target = if braking { 1.0 } else { 0.0 };
-            self.brake_light += (target - self.brake_light) * (1.0 - (-25.0 * dt).exp());
+        }
+        self.title_time += dt;
+        self.update_sound(&controls, simulate, dt);
+        if finished {
+            self.pay_prize();
+            self.finish_timer += dt;
+            if self.finish_timer > 2.5 && self.screen == Screen::Playing {
+                self.screen = Screen::Results;
+                self.menu.selected = 0;
+            }
+        }
+        if simulate {
             self.debug_timer += dt;
             if self.debug_timer > 1.0 {
                 self.debug_timer = 0.0;
                 let v = &self.vehicle;
-                let wall = self.world.as_ref().and_then(|w| w.owners.get(v.last_wall as usize)).cloned().unwrap_or_default();
                 let peak = self.sound.with(|m| std::mem::take(&mut m.peak)).unwrap_or(0.0);
+                let race = self
+                    .session
+                    .race()
+                    .map(|r| format!(" | race {:?} t {:.1} place {}/{} lap {}", r.phase, r.time, r.place(0), r.cars.len(), r.player_lap()))
+                    .unwrap_or_default();
                 log::info!(
-                    "car pos {:.1?} speed {:.1} grounded {} walls {} ({wall}) | thr {:.1} brk {:.1} steer {:.2} | audio peak {peak:.2}",
-                    v.pos, v.speed() * 3.6, v.grounded, v.wall_hits, controls.throttle, controls.brake, controls.steer
+                    "car pos {:.1?} speed {:.1} | thr {:.1} brk {:.1} steer {:.2} | traffic {} | audio {peak:.2}{race}",
+                    v.pos,
+                    v.speed() * 3.6,
+                    controls.throttle,
+                    controls.brake,
+                    controls.steer,
+                    self.session.traffic.cars.len()
                 );
             }
         }
         self.build_hud();
     }
 
+    /// Career prize, once per race, when the player crosses the line.
+    fn pay_prize(&mut self) {
+        if self.prize_paid.is_some() {
+            return;
+        }
+        let place = self.session.race().map_or(9, |r| r.place(0));
+        let Some((key, reward)) = self.race_prize.clone() else { return };
+        let Some(c) = &mut self.career else { return };
+        let prize = Career::prize(reward, place);
+        c.cash += prize;
+        if place == 1 {
+            c.won.insert(key);
+        }
+        c.save();
+        self.prize_paid = Some(prize);
+        log::info!("career: finished {place}, prize ${prize}, cash ${}", c.cash);
+    }
+
+    fn reset_player(&mut self) {
+        if let Some((p, yaw)) = self.session.race().map(|r| r.reset_point(0)) {
+            self.vehicle.reset(p + Vec3::Z * (self.vehicle.ride_height + 0.5), yaw);
+        } else {
+            self.vehicle.reset_to_safe();
+        }
+        self.camera.snap(&self.vehicle);
+    }
+
+    fn update_sound(&mut self, controls: &Controls, active: bool, dt: f32) {
+        let v = &mut self.vehicle;
+        let shifted_up = v.gear > self.last_gear && self.last_gear > 0;
+        self.last_gear = v.gear;
+        let impact = std::mem::take(&mut v.impact);
+        let skid = ((v.slip - 2.5) / 6.0).clamp(0.0, 1.0)
+            + if controls.handbrake { (v.speed().abs() / 20.0).min(1.0) * 0.6 } else { 0.0 };
+        let state = SoundState {
+            rpm: v.rpm,
+            throttle: controls.throttle,
+            speed: v.speed().abs(),
+            nitro: controls.nitro && v.nitro > 0.0 && controls.throttle > 0.1,
+            skid: skid.min(1.0),
+            active,
+        };
+        self.sound.with(|m| {
+            m.set_state(state);
+            if active && shifted_up {
+                m.shift();
+            }
+            if active && impact > 3.0 {
+                m.impact(((impact - 3.0) / 15.0).min(1.0));
+            }
+        });
+        let braking = controls.brake > 0.05 && self.vehicle.speed() > 0.5;
+        let target = if braking { 1.0 } else { 0.0 };
+        self.brake_light += (target - self.brake_light) * (1.0 - (-25.0 * dt).exp());
+    }
+
     fn player_model(&self) -> Option<&ModelInfo> {
         self.player_car.as_ref().and_then(|n| self.models.get(n))
+    }
+
+    fn race_hud(&self) -> Option<RaceHud> {
+        let r = self.session.race()?;
+        let p = &r.cars[0];
+        let countdown = match r.phase {
+            RacePhase::Countdown(t) => Some(t),
+            _ => None,
+        };
+        let speed = self.vehicle.speed().abs().max(10.0);
+        let standings = r
+            .standings()
+            .into_iter()
+            .map(|car| {
+                let prog = &r.cars[car];
+                let name = if car == 0 {
+                    "YOU".to_string()
+                } else {
+                    self.session.opponents[car - 1].model.clone()
+                };
+                StandingRow {
+                    name,
+                    gap: (p.total - prog.total) / speed,
+                    player: car == 0,
+                    finished: prog.finish_time.is_some(),
+                }
+            })
+            .collect();
+        Some(RaceHud {
+            standings,
+            place: r.place(0),
+            cars: r.cars.len(),
+            lap: r.player_lap(),
+            laps: r.laps,
+            circuit: r.def.line.circuit,
+            remaining: r.distance() - p.total,
+            time: r.time,
+            countdown,
+            go_flash: if countdown.is_none() { 1.0 - r.time } else { 0.0 },
+            wrong_way: p.wrong_way > 1.0,
+            final_lap: r.def.line.circuit && r.laps > 1 && p.lap + 1 == r.laps as i32 && p.lap_start + 3.0 > r.time,
+        })
     }
 
     fn build_hud(&mut self) {
@@ -527,87 +702,136 @@ impl Game {
             }
             _ => {}
         }
-        let t = Telemetry {
-            speed_kmh: self.vehicle.speed().abs() * 3.6,
-            gear: self.vehicle.gear,
-            rpm: self.vehicle.rpm,
-            nitro: self.vehicle.nitro,
-            fps: self.fps,
-            draw_calls: self.renderer.stats_draws,
-        };
-        if !self.paused {
+        if self.screen == Screen::Playing && !self.paused {
+            let t = Telemetry {
+                speed_kmh: self.vehicle.speed().abs() * 3.6,
+                gear: self.vehicle.gear,
+                rpm: self.vehicle.rpm,
+                nitro: self.vehicle.nitro,
+                fps: self.fps,
+                draw_calls: self.renderer.stats_draws,
+            };
             self.hud.draw(&mut self.canvas, &t, show_touch, self.cfg.show_fps);
+            if let Some(r) = self.race_hud() {
+                self.hud.race_overlay(&mut self.canvas, &r);
+            }
+            self.draw_minimap();
         }
         if let Status::Loading(s) = &self.status {
             let s = s.clone();
             let size = 1.6 * self.dp;
             self.canvas.text(self.size.0 as f32 * 0.5, 70.0 * self.dp, size, 0.5, &s, [1.0, 1.0, 1.0, 0.6]);
         }
-        if let Some(name) = &self.pending_car {
-            let text = format!("LOADING {}", display_name(name));
+        let loading = self.pending_car.as_ref().map(|n| display_name(car_name(n)).to_string()).or_else(|| {
+            self.pending_race.as_ref().map(|_| "RACE".to_string())
+        });
+        if let Some(name) = loading {
+            let text = format!("LOADING {name}");
             self.canvas.text(self.size.0 as f32 * 0.5, 90.0 * self.dp, 1.8 * self.dp, 0.5, &text, [1.0, 1.0, 1.0, 0.8]);
         }
-        if self.paused {
-            let car = self.pending_car.as_ref().or(self.player_car.as_ref()).map(|n| display_name(n).to_string());
-            let paint = PAINTS.iter().find(|(_, c)| *c == self.cfg.paint).map_or("CUSTOM", |(n, _)| n);
-            let steer = match self.cfg.steer_mode {
-                SteerMode::Buttons => "BUTTONS",
-                SteerMode::Joystick => "JOYSTICK",
-            };
-            self.pause_menu.items = vec![
-                MenuItem::button("RESUME"),
-                MenuItem::choice("CAR", car.unwrap_or_default()),
-                MenuItem::choice("COLOR", paint),
-                MenuItem::choice("STEERING", steer),
-                MenuItem::button("RESET CAR"),
-            ];
+        if self.menu_visible() {
+            self.build_menu();
             let size = vec2(self.size.0 as f32, self.size.1 as f32);
-            self.pause_menu.draw(&mut self.canvas, size, self.dp);
+            self.menu.draw(&mut self.canvas, size, self.dp);
         }
     }
 
-    fn wheel_transforms(&self, car: Mat4, wheels: &[WheelInfo; 4]) -> [Mat4; 4] {
-        let mut out = [Mat4::IDENTITY; 4];
-        for (i, w) in wheels.iter().enumerate() {
-            let p = Vec3::from(w.position);
-            let front = p.x > 0.0;
-            let steer = if front { self.vehicle.steer * 0.6 } else { 0.0 };
-            let mirror = if p.y < 0.0 { Vec3::new(1.0, -1.0, 1.0) } else { Vec3::ONE };
-            out[i] = car
-                * Mat4::from_translation(p)
-                * Mat4::from_quat(Quat::from_rotation_z(steer))
-                * Mat4::from_scale(mirror)
-                * Mat4::from_quat(Quat::from_rotation_y(self.vehicle.wheel_spin));
+    fn draw_minimap(&mut self) {
+        const RANGE: f32 = 220.0;
+        let Some(roads) = &self.roads else { return };
+        let me = self.vehicle.pos.truncate();
+        let near = |b: &[f32; 4]| {
+            me.x > b[0] - RANGE && me.x < b[2] + RANGE && me.y > b[1] - RANGE && me.y < b[3] + RANGE
+        };
+        let polylines: Vec<Vec<glam::Vec2>> = roads
+            .graph
+            .routes
+            .iter()
+            .filter(|r| near(&r.bbox))
+            .map(|r| r.points.iter().map(|p| glam::Vec2::new(p.pos[0], p.pos[1])).collect())
+            .collect();
+        let mut route = Vec::new();
+        let mut cars = Vec::new();
+        if let Some(race) = self.session.race() {
+            let line = &race.def.line;
+            let n = line.points.len();
+            let at = race.cars[0].index;
+            // The next stretch of the race, and a little behind.
+            for k in 0..140 {
+                let i = (at + n - 15 + k) % n;
+                if !line.circuit && (at + k < 15 || at + k - 15 >= n) {
+                    continue;
+                }
+                route.push(line.points[i].truncate());
+            }
+            cars.extend(self.session.opponents.iter().map(|o| (o.vehicle.pos.truncate(), [1.0, 0.25, 0.2, 1.0])));
         }
-        out
+        let map = hud::Minimap {
+            center: me,
+            heading: self.vehicle.yaw,
+            range: RANGE,
+            roads: &polylines,
+            route: &route,
+            cars: &cars,
+        };
+        self.hud.minimap(&mut self.canvas, &map);
     }
 
     /// Renders into `target`. Borrows the HUD canvas and the renderer as disjoint fields.
     fn render_to(&mut self, target: &wgpu::TextureView, width: u32, height: u32) {
-        let view = self.camera.view();
+        let (view, eye) = if self.screen == Screen::Title && self.spawned {
+            // Slow orbit around the parked car behind the title menu.
+            let t = self.title_time * 0.15;
+            let c = self.vehicle.pos + Vec3::Z * 0.6;
+            let eye = c + Vec3::new(t.cos() * 7.5, t.sin() * 7.5, 1.8);
+            (Mat4::look_at_rh(eye, c, Vec3::Z), eye)
+        } else {
+            (self.camera.view(), self.camera.eye)
+        };
+        let (right, up) = (view.row(0).truncate(), view.row(1).truncate());
         let mut cars = Vec::new();
         let mut glows = std::mem::take(&mut self.glows);
         glows.clear();
+        let near = |p: Vec3| p.distance(eye) < 160.0;
         if let (true, Some(m)) = (self.spawned, self.player_model()) {
             let t = self.vehicle.transform();
-            let wheels = self.wheel_transforms(t, &m.wheels);
+            let wheels = wheel_transforms(&self.vehicle, t, &m.wheels);
             cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light });
-            let (right, up) = (view.row(0).truncate(), view.row(1).truncate());
             push_car_glows(&mut glows, m, t, self.brake_light, right, up);
         }
-        self.glows = glows;
+        for o in &self.session.opponents {
+            let Some(m) = self.models.get(&o.model) else { continue };
+            let t = o.vehicle.transform();
+            let wheels = wheel_transforms(&o.vehicle, t, &m.wheels);
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: o.paint, skin: None, brake: o.brake_light });
+            if near(o.vehicle.pos) {
+                push_car_glows(&mut glows, m, t, o.brake_light, right, up);
+            }
+        }
+        for c in &self.session.traffic.cars {
+            let Some(m) = self.models.get(&c.model) else { continue };
+            let t = c.vehicle.transform();
+            let wheels = wheel_transforms(&c.vehicle, t, &m.wheels);
+            let skin = m.skins.get(c.skin).copied();
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: [0.5; 3], skin, brake: c.brake_light });
+            if near(c.vehicle.pos) {
+                push_car_glows(&mut glows, m, t, c.brake_light, right, up);
+            }
+        }
+        push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
         let data = FrameData {
             view,
             fov_y: self.camera.fov_y,
-            cam_pos: self.camera.eye,
+            cam_pos: eye,
             cars: &cars,
-            glows: &self.glows,
+            glows: &glows,
             glow_texture: bin_hash("HEADLIGHTGLOW"),
             draw_distance: self.cfg.draw_distance,
             vertex_light_scale: self.cfg.vertex_light_scale,
             hud: &self.canvas.vertices,
         };
         self.renderer.render(&self.gpu, target, width, height, &data);
+        self.glows = glows;
     }
 
     /// One iteration of the main loop: simulate and present.
@@ -725,6 +949,27 @@ impl Game {
     }
 }
 
+/// Street-lamp glows within reach of the camera, fading in the distance.
+fn push_world_glows(out: &mut Vec<GpuVertex>, lights: &[ug2_formats::light::WorldLight], eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) {
+    for l in lights {
+        let p = Vec3::from(l.position);
+        let to = p - eye;
+        let d = to.length();
+        if !(4.0..260.0).contains(&d) || to.dot(forward) < 0.0 {
+            continue;
+        }
+        let fade = ((260.0 - d) / 80.0).clamp(0.0, 1.0) * ((d - 4.0) / 10.0).clamp(0.0, 1.0);
+        let size = (l.size * 0.06).clamp(0.9, 3.0) * (1.0 + d / 200.0);
+        let a = (150.0 * fade) as u8;
+        if a == 0 {
+            continue;
+        }
+        // Pull the sprite towards the camera so the lamp's own mesh does not clip it.
+        let c = p - to / d * 0.6;
+        glow_quad(out, c, size, [l.color[0], l.color[1], l.color[2], a], right, up);
+    }
+}
+
 /// Camera-facing additive quad.
 fn glow_quad(out: &mut Vec<GpuVertex>, c: Vec3, size: f32, color: [u8; 4], right: Vec3, up: Vec3) {
     let (r, u) = (right * size, up * size);
@@ -745,7 +990,7 @@ fn push_car_glows(out: &mut Vec<GpuVertex>, m: &ModelInfo, t: Mat4, brake: f32, 
     }
     // Pool of light: a fan on the ground ahead of the car, bright at the centre. The
     // glow texture is sampled at its white centre so only the vertex alpha shapes it.
-    let z = -m.ride_height + 0.07;
+    let z = -m.physics.ride_height + 0.07;
     let center = Vec3::new(m.front + 6.0, 0.0, z);
     let (rx, ry) = (6.5, 3.4);
     let uv = [0.5, 0.5];

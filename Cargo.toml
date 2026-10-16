@@ -40,3 +40,10 @@ opt-level = 3
 [profile.release]
 lto = "thin"
 debug = false
+
+# Quick device builds while iterating (no LTO, incremental); release is for deliveries.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

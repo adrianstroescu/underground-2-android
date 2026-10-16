@@ -11,6 +11,7 @@ use wgpu::util::DeviceExt;
 use crate::assets::{Blend, DrawRange, GpuVertex, MeshData, PreparedTexture, Role, PAINT};
 use crate::cars::CarModel;
 use crate::hud::HudVertex;
+use crate::post::{PostFx, PostSettings, HDR_FORMAT};
 
 pub struct Gpu {
     pub instance: wgpu::Instance,
@@ -176,6 +177,8 @@ pub struct Renderer {
     sky: Vec<GpuMesh>,
     car_models: Vec<CarGpu>,
     targets: Option<Targets>,
+    post: PostFx,
+    pub post_settings: PostSettings,
     pub stats_draws: u32,
 }
 
@@ -192,8 +195,10 @@ pub const FOG_COLOR: [f32; 4] = [0.055, 0.07, 0.11, 1.0];
 impl Renderer {
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, msaa: u32) -> Self {
         let device = &gpu.device;
+        // The scene renders into an HDR target; the post pass writes `format`.
+        let scene_format = HDR_FORMAT;
         let sample_count = if msaa > 1
-            && gpu.adapter.get_texture_format_features(format).flags.sample_count_supported(msaa)
+            && gpu.adapter.get_texture_format_features(scene_format).flags.sample_count_supported(msaa)
             && gpu.adapter.get_texture_format_features(DEPTH).flags.sample_count_supported(msaa)
         {
             msaa
@@ -316,7 +321,7 @@ impl Renderer {
                     module: &mesh_shader,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState { format: scene_format, blend, write_mask: wgpu::ColorWrites::ALL })],
                 }),
                 multiview: None,
                 cache: None,
@@ -372,14 +377,8 @@ impl Renderer {
                 }],
             },
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: Default::default(),
-                bias: Default::default(),
-            }),
-            multisample: wgpu::MultisampleState { count: sample_count, mask: !0, alpha_to_coverage_enabled: false },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &hud_shader,
                 entry_point: Some("fs_main"),
@@ -439,6 +438,8 @@ impl Renderer {
             sky: Vec::new(),
             car_models: Vec::new(),
             targets: None,
+            post: PostFx::new(device, format),
+            post_settings: PostSettings::default(),
             stats_draws: 0,
         }
     }
@@ -515,7 +516,7 @@ impl Renderer {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let depth = mk(DEPTH, self.sample_count, "depth");
-        let msaa = (self.sample_count > 1).then(|| mk(self.format, self.sample_count, "msaa"));
+        let msaa = (self.sample_count > 1).then(|| mk(HDR_FORMAT, self.sample_count, "msaa"));
         self.targets = Some(Targets { width, height, depth, msaa });
     }
 
@@ -588,6 +589,7 @@ impl Renderer {
     /// Renders a frame into `target` (a swapchain image or an offscreen texture).
     pub fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, width: u32, height: u32, f: &FrameData) {
         self.ensure_targets(gpu, width, height);
+        self.post.ensure(&gpu.device, width, height);
         let view_proj = self.write_uniforms(gpu, f, width as f32 / height.max(1) as f32);
         gpu.queue.write_buffer(&self.hud_buf, 0, bytemuck::cast_slice(&[width as f32, height as f32, 0.0, 0.0]));
 
@@ -631,9 +633,10 @@ impl Renderer {
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         let mut draws = 0u32;
         {
+            let scene = self.post.scene().expect("post targets");
             let (view, resolve) = match &targets.msaa {
-                Some(ms) => (ms, Some(target)),
-                None => (target, None),
+                Some(ms) => (ms, Some(scene)),
+                None => (scene, None),
             };
             let c = FOG_COLOR;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -745,14 +748,18 @@ impl Renderer {
                 draws += 1;
             }
 
-            if !f.hud.is_empty() {
+        }
+        // Bloom, tone and grading into the screen image, then the HUD on top.
+        let hud_count = f.hud.len() as u32;
+        self.post.run(&gpu.queue, &mut encoder, target, &self.post_settings, |pass| {
+            if hud_count > 0 {
                 pass.set_pipeline(&self.pipe_hud);
                 pass.set_bind_group(0, &self.hud_bg, &[]);
                 pass.set_vertex_buffer(0, self.hud_vbuf.slice(..hud_bytes.len() as u64));
-                pass.draw(0..f.hud.len() as u32, 0..1);
-                draws += 1;
+                pass.draw(0..hud_count, 0..1);
             }
-        }
+        });
+        draws += 5;
         gpu.queue.submit(Some(encoder.finish()));
         self.stats_draws = draws;
     }

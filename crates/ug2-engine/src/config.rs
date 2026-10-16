@@ -1,6 +1,9 @@
 //! User settings, stored as `key = value` lines next to the game data.
 
+use std::collections::HashMap;
 use std::path::Path;
+
+use ug2_formats::car::PartSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SteerMode {
@@ -25,6 +28,9 @@ pub struct GameConfig {
     pub draw_distance: f32,
     /// Multiplier for baked track vertex lighting.
     pub vertex_light_scale: f32,
+    pub traffic: bool,
+    /// Visual parts per car.
+    pub parts: HashMap<String, PartSet>,
 }
 
 impl Default for GameConfig {
@@ -41,6 +47,8 @@ impl Default for GameConfig {
             render_scale: 1.0,
             draw_distance: 650.0,
             vertex_light_scale: 2.0,
+            traffic: true,
+            parts: HashMap::new(),
         }
     }
 }
@@ -99,12 +107,30 @@ impl GameConfig {
                 "draw_distance" => self.draw_distance = f().unwrap_or(self.draw_distance).clamp(100.0, 3000.0),
                 "vertex_light_scale" => self.vertex_light_scale = f().unwrap_or(self.vertex_light_scale),
                 "version" => {}
+                _ if k.starts_with("parts.") => {
+                    let n: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() == 4 {
+                        let p = PartSet { kit: n[0], widebody: n[1], hood: n[2], lights: n[3] };
+                        self.parts.insert(k["parts.".len()..].to_string(), p);
+                    }
+                }
+                "traffic" => self.traffic = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on"),
                 _ => log::warn!("unknown setting {k}"),
             }
         }
     }
 
+    pub fn parts_for(&self, car: &str) -> PartSet {
+        self.parts.get(car).copied().unwrap_or_default()
+    }
+
     pub fn to_text(&self) -> String {
+        let mut parts = String::new();
+        for (car, p) in &self.parts {
+            if !p.is_stock() {
+                parts.push_str(&format!("parts.{car} = {}, {}, {}, {}\n", p.kit, p.widebody, p.hood, p.lights));
+            }
+        }
         format!(
             "# Underground 2 Android settings\n\
              version = 2\n\
@@ -118,7 +144,8 @@ impl GameConfig {
              msaa = {}   # 1 or 4\n\
              render_scale = {}\n\
              draw_distance = {}\n\
-             vertex_light_scale = {}\n",
+             vertex_light_scale = {}\n\
+             traffic = {}\n{}",
             self.car,
             self.location,
             self.paint[0],
@@ -132,6 +159,8 @@ impl GameConfig {
             self.render_scale,
             self.draw_distance,
             self.vertex_light_scale,
+            self.traffic as u8,
+            parts,
         )
     }
 }

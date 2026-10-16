@@ -6,12 +6,17 @@ Nu emulăm nimic: nu rulăm `speed2.exe`, nu folosim Wine/Box64/x86. Motorul cit
 
 > **Fișierele jocului NU sunt incluse și nu vor fi incluse în acest repo.** Ai nevoie de propria copie a jocului; fișierele se copiază pe telefon separat (vezi mai jos).
 
-## Ce merge acum (v0.1)
+## Ce merge acum (v0.2)
 
-- Orașul Bayview complet, încărcat din `TRACKS/STREAML4RA.BUN`: 583 de secțiuni, ~900k triunghiuri, ~1.900 de texturi, cer cu nori, neoane (blending aditiv), garduri și vegetație (alpha).
-- Nissan 350Z stoc, cu roți poziționate din `CarTypeInfo` (GLOBALB), vopsea configurabilă.
-- Condus: fizică arcade (accelerație, frână, mers înapoi, frână de mână cu drift, nitro, cutie automată cu 6 trepte), urmărirea terenului, coliziune cu clădiri, ziduri și parapeți.
-- HUD tactil multi-touch: butoane « » pentru direcție (sau joystick virtual), pedale GAS și BRAKE, NOS, E-BRAKE, LOOK (privire înapoi), CAM, RESET, pauză; vitezometru, treaptă, turație, nitro, FPS.
+- Orașul Bayview complet, încărcat din `TRACKS/STREAML4RA.BUN`: 583 de secțiuni, ~900k triunghiuri, ~1.900 de texturi, cer cu nori, neoane (blending aditiv), garduri și vegetație (alpha), lumini stradale.
+- Toate cele 31 de mașini ale jocului (din `CarTypeInfo`), cu geamuri, interior, faruri aprinse, stopuri (puternice la frână), umbră și vopsea configurabilă; plus cele 15 modele de trafic cu vopselele lor.
+- Condus: fizică arcade (accelerație, frână, mers înapoi, frână de mână cu drift, nitro, cutie automată cu 6 trepte), urmărirea terenului, coliziune cu clădiri, ziduri, parapeți și cu celelalte mașini.
+- Sunet: motorul fiecărei mașini (granular, din fișierele GIN originale), schimbatul vitezelor, nitro, derapaje, vânt, coliziuni; muzica jocului (73 de piese, amestecate).
+- Trafic în oraș pe rețeaua de drumuri originală (`RoutesFreeRoam.bin`), pe banda din dreapta, cu șoferi AI care păstrează distanța.
+- Curse rapide (Quick Race): circuite și sprinturi din Bayview, cu grila de start, linia de start/sosire și traseul originale, 1–5 adversari AI, ture, poziții, cronometru, „WRONG WAY”, rezultate.
+- Carieră: cursele originale din Bayview în ordinea premiilor, deblocate pe rând, premii în bani (locurile 1–3), garaj cu mașini de cumpărat și upgrade-uri ENGINE / TURBO / NITROUS / TIRES (3 niveluri) care schimbă fizica; salvare în `career.cfg`. Adversarii cresc în clasă și putere pe parcurs.
+- Meniu principal, meniu de pauză, alegerea mașinii/culorii/traficului/direcției; minimap rotund cu străzile și traseul cursei.
+- HUD tactil multi-touch: butoane « » pentru direcție (sau joystick virtual), pedale GAS și BRAKE, NOS, E-BRAKE, LOOK (privire înapoi), CAM, RESET, pauză; vitezometru, treaptă, turație, nitro, FPS. Designul țintă pentru HUD-ul final e în `docs/hud-target.png`.
 - Gamepad (Bluetooth/USB) și tastatură, cu mapare editabilă în `controls.cfg`.
 - Testat pe Galaxy S23 Ultra (Adreno 740, Android 16): **~120 FPS** la ~1.800 de draw call-uri, orașul se încarcă în ~1 s.
 - Testat și în emulatorul Android (x86_64, Vulkan): 40–50 FPS pe un GPU Intel integrat.
@@ -24,16 +29,16 @@ Pe PC: Android SDK + NDK (Android Studio), Rust (`rustup target add aarch64-linu
 # 1. construiește și instalează APK-ul (build\ug2.apk)
 powershell -ExecutionPolicy Bypass -File scripts\build-apk.ps1 -Install
 
-# 2. copiază fișierele jocului pe telefon (~150 MB) din instalarea ta de PC
+# 2. copiază fișierele jocului pe telefon (~1,5 GB: mașini, oraș, rute, sunet, muzică) din instalarea ta de PC
 powershell -ExecutionPolicy Bypass -File scripts\push-game-data.ps1 -GameDir "D:\Jocuri\NFSU2"
 
 # 3. pornește „NFS Underground 2” de pe telefon. Log-uri:
 adb logcat -s ug2:*
 ```
 
-Fișierele ajung în `/sdcard/Android/data/com.adrianstroescu.ug2/files/NFSU2/` (CARS, GLOBAL, TRACKS). Tot acolo se creează `ug2.cfg` (setări) și `controls.cfg` (mapare butoane).
+Fișierele ajung în `/sdcard/Android/data/com.adrianstroescu.ug2/files/NFSU2/` (CARS, GLOBAL, TRACKS, SOUND, pfdata). Tot acolo se creează `ug2.cfg` (setări) și `controls.cfg` (mapare butoane).
 
-`-Emulator` adaugă și biblioteca x86_64, ca același APK să meargă în emulatorul Android Studio.
+`-Emulator` adaugă și biblioteca x86_64, ca același APK să meargă în emulatorul Android Studio; `-EmulatorOnly` construiește doar x86_64 (mai rapid la teste).
 
 ## Controale
 
@@ -82,7 +87,10 @@ scripts/        build-apk.ps1, push-game-data.ps1
 
 ## Urmează
 
-Panoramele de fundal (`PAN_*`), streaming pe distanță (memorie), alte mașini și piese, faruri și reflexii pe mașină, trafic, sunet (motor, muzică), meniuri, curse și carieră. Build-ul de desktop crapă la pornire pe toolchain-ul `windows-gnu` (problemă de linkare a wgpu pe Windows, fără impact asupra Android).
+- Grafică: post-procesare HDR (bloom pe neoane și faruri, curbă de ton, contrast), reflexii pe drum și pe mașini (cum face jocul original: cameră oglindită și cube map), ceață de orizont, panoramele de fundal (`PAN_*`).
+- Tuning vizual: kituri de caroserie, spoilere, jante, capote, neon, viniluri.
+- Celelalte tipuri de curse (drag, drift, Street X, URL) din regiunile L4RB–L4RG; HUD-ul final după `docs/hud-target.png` (oglindă retrovizoare, indicator drift).
+- Build-ul de desktop crapă la pornire pe toolchain-ul `windows-gnu` (problemă de linkare a wgpu pe Windows, fără impact asupra Android).
 
 ## Licență
 

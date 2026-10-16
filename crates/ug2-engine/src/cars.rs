@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use glam::{Mat4, Vec3};
 use ug2_formats::bin_hash;
-use ug2_formats::car::{runtime_materials, stock_part_hashes, traffic_parts, Material, PartKind};
+use ug2_formats::car::{fitted_parts, runtime_materials, traffic_parts, Material, PartKind, PartSet};
 use ug2_formats::carinfo::{parse_car_types, CarTypeInfo, CarUsage, WheelInfo};
 use ug2_formats::fs::GameDir;
 use ug2_formats::solid::{find_solid_lists, Solid};
@@ -39,6 +39,14 @@ impl SharedCarData {
         Self { types, textures }
     }
 
+    /// Stock performance of every car with data.
+    pub fn perfs(&self) -> Vec<(String, crate::vehicle::Perf)> {
+        self.types
+            .iter()
+            .filter_map(|t| perf_from(&t.drivetrain, t.wheels[0].radius).map(|p| (t.name.clone(), p)))
+            .collect()
+    }
+
     pub fn names(&self, usage: CarUsage) -> Vec<String> {
         self.types.iter().filter(|t| t.usage == usage).map(|t| t.name.clone()).collect()
     }
@@ -50,6 +58,8 @@ impl SharedCarData {
 
 pub struct CarModel {
     pub name: String,
+    /// Visual parts fitted (stock for traffic and opponents).
+    pub parts: PartSet,
     pub body: MeshData,
     pub wheel: Option<MeshData>,
     /// Soft shadow quad under the car (`<CAR>_SHADOWIG`).
@@ -83,7 +93,7 @@ fn center(s: &Solid) -> Vec3 {
 }
 
 /// Loads a racer or traffic car. Returns the model and every texture it draws with.
-pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str) -> anyhow::Result<(CarModel, Vec<Texture>)> {
+pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str, fitted: &PartSet) -> anyhow::Result<(CarModel, Vec<Texture>)> {
     let geo = game.read(&format!("CARS/{name}/GEOMETRY.BIN"))?;
     let own: Vec<Texture> = game
         .read(&format!("CARS/{name}/TEXTURES.BIN"))
@@ -95,8 +105,8 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str) -> anyhow::R
 
     let mut available: HashMap<u32, &Texture> = shared.textures.iter().map(|(h, t)| (*h, t)).collect();
     available.extend(own.iter().map(|t| (t.hash, t)));
-    let runtime: HashMap<u32, (Option<u32>, Material)> =
-        runtime_materials(name).into_iter().map(|(h, r, m)| (h, (r, m))).collect();
+    let runtime: HashMap<u32, (Vec<u32>, Material)> =
+        runtime_materials(name, fitted.lights).into_iter().map(|(h, r, m)| (h, (r, m))).collect();
     let skin1 = bin_hash(&format!("{name}_SKIN1"));
     let skins: Vec<u32> =
         (1..=8).map(|i| bin_hash(&format!("{name}_SKIN{i}"))).filter(|h| available.contains_key(h)).collect();
@@ -117,14 +127,14 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str) -> anyhow::R
         if h == skin1 && detail.is_some() {
             return (h, Blend::Opaque, Role::PaintDetail);
         }
-        if let Some(&(replacement, material)) = runtime.get(&h) {
+        if let Some((candidates, material)) = runtime.get(&h) {
             let role = match material {
                 Material::Paint => return (PAINT, Blend::Opaque, Role::Paint),
                 Material::Window | Material::HeadlightGlass => Role::Glass,
                 Material::Headlight => Role::Headlight,
                 Material::Brakelight | Material::BrakelightGlass => Role::Brakelight,
             };
-            let tex = replacement.unwrap_or(0);
+            let tex = candidates.iter().copied().find(|c| available.contains_key(c)).unwrap_or(0);
             let blend = available.get(&tex).map(|t| blend_for(t)).unwrap_or(Blend::Opaque);
             return (tex, blend, role);
         }
@@ -134,10 +144,16 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str) -> anyhow::R
         }
     };
 
+    // Each part: the first candidate solid the car has (styles fall back to stock).
     let parts: Vec<(u32, PartKind)> = if traffic {
         traffic_parts(name).into_iter().map(|(n, k)| (bin_hash(&n), k)).collect()
     } else {
-        stock_part_hashes(name)
+        fitted_parts(name, fitted)
+            .into_iter()
+            .filter_map(|(names, k)| {
+                names.iter().map(|n| bin_hash(n)).find(|h| solids.iter().any(|s| s.hash == *h)).map(|h| (h, k))
+            })
+            .collect()
     };
     let mut body_v: Vec<GpuVertex> = Vec::new();
     let mut body_b = HashMap::new();
@@ -205,6 +221,7 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str) -> anyhow::R
     textures.extend(detail);
     let car = CarModel {
         name: name.to_string(),
+        parts: *fitted,
         body: finish_mesh(body_v, body_b, body_box),
         wheel,
         shadow,
@@ -270,6 +287,20 @@ fn skin_detail(hash: u32, line: &Texture, mask: &Texture) -> Option<Texture> {
     })
 }
 
+/// Key a loaded model is known by: the car name, plus the fitted parts when not stock.
+pub fn model_key(name: &str, parts: &PartSet) -> String {
+    if parts.is_stock() {
+        name.to_string()
+    } else {
+        format!("{name}#{}", parts.key())
+    }
+}
+
+/// Car name of a model key.
+pub fn car_name(key: &str) -> &str {
+    key.split('#').next().unwrap_or(key)
+}
+
 /// Flat quad on the ground under the body; the texture's long side runs along the car.
 fn shadow_quad(tex: u32, min: Vec3, max: Vec3, z: f32) -> MeshData {
     let (cx, cy) = ((min.x + max.x) * 0.5, (min.y + max.y) * 0.5);
@@ -284,6 +315,57 @@ fn shadow_quad(tex: u32, min: Vec3, max: Vec3, z: f32) -> MeshData {
     let mut buckets = HashMap::new();
     buckets.insert((Blend::Blend, tex, Role::Shadow), vec![0, 1, 2, 0, 2, 3]);
     finish_mesh(vertices, buckets, (Vec3::new(cx - hx, cy - hy, z), Vec3::new(cx + hx, cy + hy, z)))
+}
+
+/// Class of a racer: 1 (starter) .. 3 (top), roughly as the game unlocks them.
+pub fn tier(car: &str) -> u32 {
+    match car {
+        "PEUGOT" | "FOCUS" | "COROLLA" | "240SX" | "MIATA" | "CIVIC" | "PEUGOT106" | "CORSA" => 1,
+        "HUMMER" | "NAVIGATOR" | "ESCALADE" | "TIBURON" | "SENTRA" | "CELICA" | "IS300" | "GOLF" | "A3" | "RSX"
+        | "ECLIPSE" => 2,
+        _ => 3,
+    }
+}
+
+/// Stock performance from the car's real data: power-to-weight relative to the median
+/// racer (108 W/kg, square-rooted so the field stays close), top speed from the
+/// limiter or the gearing, grip from the tyres relative to the median (1.66).
+pub fn perf_from(d: &ug2_formats::carinfo::Drivetrain, wheel_radius: f32) -> Option<crate::vehicle::Perf> {
+    if d.mass < 300.0 || d.max_rpm < 1000.0 {
+        return None;
+    }
+    let w_per_kg = d.peak_kw() * 1000.0 / d.mass;
+    let top_gear = d.gears.iter().copied().filter(|g| *g > 0.0).fold(f32::MAX, f32::min);
+    let gearing = if top_gear < f32::MAX && d.final_drive > 0.0 {
+        d.redline_rpm / 60.0 * std::f32::consts::TAU * wheel_radius / (top_gear * d.final_drive)
+    } else {
+        f32::MAX
+    };
+    let limit = if d.speed_limit > 10.0 { d.speed_limit } else { f32::MAX };
+    Some(crate::vehicle::Perf {
+        power: (w_per_kg / 108.0).sqrt().clamp(0.75, 1.25),
+        top_speed: limit.min(gearing).clamp(40.0, 72.0),
+        grip: ((d.grip[0] + d.grip[1]) * 0.5 / 1.66).clamp(0.85, 1.15),
+        nitro: 1.0,
+        mass: d.mass / 1000.0,
+    })
+}
+
+/// Fallback when a car's data is missing: by class; SUVs are slower and grip less.
+pub fn base_perf(car: &str) -> crate::vehicle::Perf {
+    let suv = matches!(car, "HUMMER" | "NAVIGATOR" | "ESCALADE");
+    let (power, top) = match tier(car) {
+        1 => (0.82, 58.0),
+        2 => (0.92, 64.0),
+        _ => (1.0, 70.0),
+    };
+    crate::vehicle::Perf {
+        power: if suv { power * 1.05 } else { power },
+        top_speed: if suv { top - 6.0 } else { top },
+        grip: if suv { 0.85 } else { 0.95 + 0.03 * tier(car) as f32 },
+        nitro: 1.0,
+        mass: if suv { 2.7 } else { 1.3 },
+    }
 }
 
 /// Human-readable names for the 31 racers.

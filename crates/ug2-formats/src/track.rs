@@ -3,6 +3,7 @@
 
 use crate::bytes::{cstr_at, u32_at};
 use crate::chunk::{ids, ChunkIter};
+use crate::light::{parse_light_pack, WorldLight, LIGHT_PACK};
 use crate::scenery::{parse_scenery_section, ScenerySection};
 use crate::solid::{parse_solid_list, SolidList};
 use crate::tpk::{parse_tpk, TexturePack};
@@ -50,6 +51,7 @@ pub struct SectionData {
     pub solids: Vec<SolidList>,
     pub textures: Vec<TexturePack>,
     pub scenery: Vec<ScenerySection>,
+    pub lights: Vec<WorldLight>,
 }
 
 /// Parses every chunk in `stream[start..start+len]`. Offsets stay absolute so that
@@ -71,6 +73,10 @@ pub fn parse_region(stream: &[u8], start: usize, len: usize) -> SectionData {
             ids::SCENERY_SECTION => match parse_scenery_section(&c) {
                 Ok(s) => out.scenery.push(s),
                 Err(e) => log::warn!("scenery at {:#x}: {e}", c.offset),
+            },
+            LIGHT_PACK => match parse_light_pack(&c) {
+                Ok(l) => out.lights.extend(l),
+                Err(e) => log::warn!("lights at {:#x}: {e}", c.offset),
             },
             _ => {}
         }

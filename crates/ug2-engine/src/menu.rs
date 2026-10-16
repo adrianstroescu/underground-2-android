@@ -50,11 +50,14 @@ impl Menu {
     pub fn draw(&mut self, c: &mut Canvas, size: Vec2, dp: f32) {
         let s = dp;
         c.rect(0.0, 0.0, size.x, size.y, [0.0, 0.0, 0.0, 0.55]);
-        let row_h = 46.0 * s;
-        let gap = 8.0 * s;
-        let width = (size.x * 0.62).clamp(280.0 * s, 560.0 * s).min(size.x - 32.0 * s);
-        let total = self.items.len() as f32 * (row_h + gap) - gap;
         let title_h = if self.subtitle.is_empty() { 40.0 * s } else { 58.0 * s };
+        let n = self.items.len().max(1) as f32;
+        // Rows shrink (down to 30 dp) when there are many, so the list always fits.
+        let fit = (size.y - title_h - 24.0 * s) / n;
+        let row_h = (46.0 * s).min(fit * 0.85).max(30.0 * s);
+        let gap = (8.0 * s).min(fit * 0.15).max(3.0 * s);
+        let width = (size.x * 0.62).clamp(280.0 * s, 560.0 * s).min(size.x - 32.0 * s);
+        let total = n * (row_h + gap) - gap;
         let x0 = (size.x - width) * 0.5;
         let mut y = ((size.y - total - title_h) * 0.5).max(12.0 * s) + title_h;
 

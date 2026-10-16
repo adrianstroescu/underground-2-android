@@ -1,11 +1,15 @@
 # Builds build/ug2.apk without Gradle: cargo -> javac/d8 -> aapt2 -> zipalign -> apksigner.
-#   powershell -ExecutionPolicy Bypass -File scripts\build-apk.ps1 [-Install] [-Run] [-DebugBuild] [-Emulator]
-# -Emulator also packs an x86_64 library so the same APK runs in the Android emulator.
+#   powershell -ExecutionPolicy Bypass -File scripts\build-apk.ps1 [-Install] [-Run] [-DebugBuild] [-Emulator] [-EmulatorOnly]
+# -Emulator also packs an x86_64 library so the same APK runs in the Android emulator;
+# -EmulatorOnly builds just that one (half the build time while testing in the emulator).
+# -Fast uses the "fast" profile (no LTO, incremental): much quicker rebuilds for testing.
 param(
     [switch]$Install,
     [switch]$Run,
     [switch]$DebugBuild,
-    [switch]$Emulator
+    [switch]$Emulator,
+    [switch]$EmulatorOnly,
+    [switch]$Fast
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
@@ -40,8 +44,9 @@ if (-not (Get-Command dlltool.exe -ErrorAction SilentlyContinue)) {
 
 $abis = @(@{ abi = "arm64-v8a"; target = "aarch64-linux-android" })
 if ($Emulator) { $abis += @{ abi = "x86_64"; target = "x86_64-linux-android" } }
+if ($EmulatorOnly) { $abis = @(@{ abi = "x86_64"; target = "x86_64-linux-android" }) }
 
-$profile = if ($DebugBuild) { "debug" } else { "release" }
+$profile = if ($DebugBuild) { "debug" } elseif ($Fast) { "fast" } else { "release" }
 $out = "$root\build"
 $stage = "$out\stage"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
@@ -54,7 +59,7 @@ foreach ($a in $abis) {
     Set-Item "env:CC_$($t.Replace('-', '_'))" $clang
     Set-Item "env:AR_$($t.Replace('-', '_'))" "$llvm\llvm-ar.exe"
     $cargoArgs = @("build", "-p", "ug2-android", "--target", $t)
-    if (-not $DebugBuild) { $cargoArgs += "--release" }
+    if ($Fast) { $cargoArgs += @("--profile", "fast") } elseif (-not $DebugBuild) { $cargoArgs += "--release" }
     Push-Location $root
     try {
         & cargo @cargoArgs

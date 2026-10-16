@@ -13,6 +13,8 @@ pub mod compression;
 pub mod dxt;
 pub mod fs;
 pub mod hash;
+pub mod light;
+pub mod route;
 pub mod scenery;
 pub mod solid;
 pub mod tpk;

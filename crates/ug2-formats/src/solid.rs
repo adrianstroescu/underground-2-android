@@ -49,6 +49,32 @@ pub struct Solid {
     pub textures: Vec<u32>,
     pub shaders: Vec<u32>,
     pub mesh: Option<Mesh>,
+    /// Attachment points (spoiler, mirrors, exhaust tips, neon...): name hash and position
+    /// in the solid's space.
+    pub markers: Vec<Marker>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Marker {
+    pub hash: u32,
+    pub position: [f32; 3],
+    /// Row-major 4x4 with translation in elements 12..15.
+    pub matrix: [f32; 16],
+}
+
+const MARKERS: u32 = 0x0013_401A;
+const MARKER_LEN: usize = 80;
+
+fn parse_markers(c: Option<Chunk>) -> Vec<Marker> {
+    let Some(c) = c else { return Vec::new() };
+    // 80-byte records aligned to the end of the chunk, after alignment padding.
+    let data = &c.data[c.data.len() % MARKER_LEN..];
+    data.chunks_exact(MARKER_LEN)
+        .filter_map(|r| {
+            let matrix = mat4_at(r, 16).ok()?;
+            Some(Marker { hash: u32_at(r, 0).ok()?, position: [matrix[12], matrix[13], matrix[14]], matrix })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -143,6 +169,7 @@ fn parse_object(obj: &Chunk) -> Result<Solid> {
         textures: hash_list(obj.child(ids::SOLID_TEXTURE_REFS)),
         shaders: hash_list(obj.child(ids::SOLID_SHADER_REFS)),
         mesh,
+        markers: parse_markers(obj.child(MARKERS)),
     })
 }
 

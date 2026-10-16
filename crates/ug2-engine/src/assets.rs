@@ -17,6 +17,7 @@ use ug2_formats::track::{parse_region, parse_streaming_sections};
 use crate::cars::{load_car, CarModel, SharedCarData};
 use crate::sound::{Effects, EngineSound};
 use crate::collision::CollisionWorld;
+use crate::roads::RoadData;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -94,14 +95,18 @@ pub enum LoadEvent {
     Progress(String),
     Textures(Vec<PreparedTexture>),
     /// Car lists from CarTypeInfo.
-    CarList { racers: Vec<String>, traffic: Vec<String> },
+    CarList { racers: Vec<String>, traffic: Vec<String>, perfs: Vec<(String, crate::vehicle::Perf)> },
     Car(Box<CarModel>),
+    /// Model key of a car that could not be loaded.
     CarFailed(String),
     Effects(Box<Effects>),
     Engine { car: String, sound: Box<EngineSound> },
+    Roads(Box<RoadData>),
     Collision(CollisionWorld),
     Spawn { pos: Vec3, yaw: f32 },
     Section(SectionAsset),
+    /// Street lamps and other world lights, drawn as glows at night.
+    Lights(Vec<ug2_formats::light::WorldLight>),
     Done,
     Failed(String),
 }
@@ -109,13 +114,14 @@ pub enum LoadEvent {
 #[derive(Clone)]
 pub struct LoaderConfig {
     pub car: String,
+    pub parts: ug2_formats::car::PartSet,
     pub location: String,
     pub bc_textures: bool,
 }
 
 /// Requests the game sends to the loader thread.
 pub enum LoadRequest {
-    Car(String),
+    Car { name: String, parts: ug2_formats::car::PartSet },
 }
 
 /// Background loader: loads the player's car and the world, then serves car requests.
@@ -139,8 +145,8 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             let shared = SharedCarData::load(&game);
             let racers = shared.names(CarUsage::Racer);
             let traffic = shared.names(CarUsage::Traffic);
-            let _ = tx.send(LoadEvent::CarList { racers, traffic });
-            send_car(&game, &shared, &cfg, &cfg.car, &tx);
+            let _ = tx.send(LoadEvent::CarList { racers, traffic, perfs: shared.perfs() });
+            send_car(&game, &shared, &cfg, &cfg.car, &cfg.parts, &tx);
             let _ = tx.send(LoadEvent::Effects(Box::new(Effects::load(&game))));
             if let Err(e) = load_world(&game, &cfg, &tx) {
                 log::error!("load failed: {e:#}");
@@ -149,7 +155,7 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             }
             for req in req_rx {
                 match req {
-                    LoadRequest::Car(name) => send_car(&game, &shared, &cfg, &name, &tx),
+                    LoadRequest::Car { name, parts } => send_car(&game, &shared, &cfg, &name, &parts, &tx),
                 }
             }
         })
@@ -157,9 +163,16 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
     Loader { events: rx, requests: req_tx }
 }
 
-fn send_car(game: &GameDir, shared: &SharedCarData, cfg: &LoaderConfig, name: &str, tx: &Sender<LoadEvent>) {
+fn send_car(
+    game: &GameDir,
+    shared: &SharedCarData,
+    cfg: &LoaderConfig,
+    name: &str,
+    parts: &ug2_formats::car::PartSet,
+    tx: &Sender<LoadEvent>,
+) {
     let t0 = std::time::Instant::now();
-    match load_car(game, shared, name) {
+    match load_car(game, shared, name, parts) {
         Ok((car, textures)) => {
             let prepared = textures.iter().filter_map(|t| prepare_texture(t, cfg.bc_textures)).collect();
             let _ = tx.send(LoadEvent::Textures(prepared));
@@ -171,7 +184,7 @@ fn send_car(game: &GameDir, shared: &SharedCarData, cfg: &LoaderConfig, name: &s
         }
         Err(e) => {
             log::error!("car {name}: {e:#}");
-            let _ = tx.send(LoadEvent::CarFailed(name.to_string()));
+            let _ = tx.send(LoadEvent::CarFailed(crate::cars::model_key(name, parts)));
         }
     }
 }
@@ -191,6 +204,7 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
     let mut solids: HashMap<u32, Arc<Solid>> = HashMap::new();
     let mut textures: Vec<Texture> = Vec::new();
     let mut scenery: Vec<ScenerySection> = Vec::new();
+    let mut lights = Vec::new();
     for s in &sections {
         if s.offset + s.size > stream.len() {
             continue;
@@ -205,6 +219,7 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
             textures.extend(p.textures);
         }
         scenery.extend(d.scenery);
+        lights.extend(d.lights);
     }
     drop(stream);
     // Shared world textures (street furniture, cranes, ships...) live outside the stream.
@@ -230,6 +245,8 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
     send(LoadEvent::Progress("BUILDING COLLISION".into()));
     let (collision, spawn) = build_collision(&scenery, &solids);
     send(LoadEvent::Collision(collision));
+    log::info!("{} world lights", lights.len());
+    send(LoadEvent::Lights(lights));
     let (spawn_pos, spawn_yaw) = spawn.unwrap_or((Vec3::new(0.0, 0.0, 20.0), 0.0));
     send(LoadEvent::Spawn { pos: spawn_pos, yaw: spawn_yaw });
 
@@ -266,6 +283,10 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
         send(LoadEvent::Section(SectionAsset { number: sc.number, sky, mesh }));
     }
     log::info!("world loaded in {:.2?}", t0.elapsed());
+    match RoadData::load(game, &cfg.location) {
+        Ok(r) => send(LoadEvent::Roads(Box::new(r))),
+        Err(e) => log::warn!("no road data: {e:#}"),
+    }
     send(LoadEvent::Done);
     Ok(())
 }

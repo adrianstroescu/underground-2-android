@@ -6,6 +6,27 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 use crate::collision::CollisionWorld;
 use crate::input::Controls;
 
+/// Per-car performance: the car's class plus upgrades.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Perf {
+    /// Multiplier on engine force.
+    pub power: f32,
+    /// Top speed without nitro, m/s.
+    pub top_speed: f32,
+    /// Multiplier on tyre grip (cornering and sideways).
+    pub grip: f32,
+    /// Nitro capacity and strength multiplier.
+    pub nitro: f32,
+    /// Tonnes, for car-to-car contact.
+    pub mass: f32,
+}
+
+impl Default for Perf {
+    fn default() -> Self {
+        Self { power: 1.0, top_speed: MAX_SPEED, grip: 1.0, nitro: 1.0, mass: 1.4 }
+    }
+}
+
 pub struct Vehicle {
     pub pos: Vec3,
     pub yaw: f32,
@@ -21,6 +42,7 @@ pub struct Vehicle {
     pub wheel_spin: f32,
     /// Height of the car origin above the ground (from wheel hub height and radius).
     pub ride_height: f32,
+    pub perf: Perf,
     pub wheelbase: f32,
     last_safe: (Vec3, f32),
     safe_timer: f32,
@@ -59,6 +81,7 @@ impl Vehicle {
             wheel_spin: 0.0,
             ride_height,
             wheelbase,
+            perf: Perf::default(),
             last_safe: (pos, yaw),
             safe_timer: 0.0,
             slip: 0.0,
@@ -113,13 +136,15 @@ impl Vehicle {
             // Engine / brakes along the car.
             let nitro_on = c.nitro && self.nitro > 0.0 && c.throttle > 0.1;
             if nitro_on {
-                self.nitro = (self.nitro - dt / 6.0).max(0.0);
+                self.nitro = (self.nitro - dt / (6.0 * self.perf.nitro.max(0.5))).max(0.0);
             } else {
                 self.nitro = (self.nitro + dt / 40.0).min(1.0);
             }
-            let top = if nitro_on { MAX_SPEED * 1.15 } else { MAX_SPEED };
-            let power = 14.0 * (1.0 - (v_long / top).clamp(0.0, 1.0).powf(1.6)) + 2.0;
-            let mut accel = c.throttle * power * if nitro_on { 1.6 } else { 1.0 };
+            let base_top = self.perf.top_speed;
+            let top = if nitro_on { base_top * (1.1 + 0.05 * self.perf.nitro) } else { base_top };
+            let power = (14.0 * (1.0 - (v_long / top).clamp(0.0, 1.0).powf(1.6)) + 2.0) * self.perf.power;
+            let boost = 1.0 + 0.6 * self.perf.nitro;
+            let mut accel = c.throttle * power * if nitro_on { boost } else { 1.0 };
             if c.brake > 0.05 {
                 if v_long > 0.5 {
                     accel -= c.brake * 22.0;
@@ -140,13 +165,13 @@ impl Vehicle {
 
             self.slip = v_lat.abs();
             // Lateral grip: kill sideways velocity, much less with the handbrake.
-            let grip = if c.handbrake { 1.6 } else { 9.0 };
+            let grip = if c.handbrake { 1.6 } else { 9.0 * self.perf.grip };
             v_lat *= (-grip * dt).exp();
 
             // Yaw from a bicycle model; handbrake adds rotation for drifts.
             let steer_angle = self.steer * 0.6;
             let mut target_rate = v_long / self.wheelbase * steer_angle.tan();
-            let max_rate = (MAX_LAT_ACCEL / v_long.abs().max(1.0)).max(MIN_YAW_CAP);
+            let max_rate = (MAX_LAT_ACCEL * self.perf.grip / v_long.abs().max(1.0)).max(MIN_YAW_CAP);
             target_rate = target_rate.clamp(-max_rate, max_rate);
             if c.handbrake {
                 target_rate *= 1.6;
@@ -231,12 +256,14 @@ impl Vehicle {
             self.rpm = (v.abs() / MAX_REVERSE).min(1.0);
         } else {
             let mut g = 1;
-            while g < 6 && v > GEAR_TOP[g as usize - 1] * 0.97 {
+            // Gear ratios stretch with the car's top speed.
+            let k = self.perf.top_speed / MAX_SPEED;
+            while g < 6 && v > GEAR_TOP[g as usize - 1] * k * 0.97 {
                 g += 1;
             }
             self.gear = g;
-            let lo = if g == 1 { 0.0 } else { GEAR_TOP[g as usize - 2] * 0.6 };
-            let hi = GEAR_TOP[g as usize - 1];
+            let lo = if g == 1 { 0.0 } else { GEAR_TOP[g as usize - 2] * k * 0.6 };
+            let hi = GEAR_TOP[g as usize - 1] * k;
             self.rpm = (0.18 + 0.82 * ((v - lo) / (hi - lo)).clamp(0.0, 1.0)).min(1.0);
             if c.throttle > 0.5 && v < 2.0 {
                 self.rpm = 0.6;
