@@ -177,6 +177,9 @@ pub struct Game {
     vis_listed: Vec<bool>,
     vis_view: Option<u16>,
     vis_cars: Vec<u16>,
+    /// Regular paint light materials by their colour, and the traffic cars' material.
+    paint_materials: Vec<([f32; 3], u16)>,
+    traffic_material: u16,
     vehicle: Vehicle,
     models: HashMap<String, ModelInfo>,
     physics: HashMap<String, ModelPhysics>,
@@ -288,6 +291,8 @@ impl Game {
             vis_listed: Vec::new(),
             vis_view: None,
             vis_cars: Vec::new(),
+            paint_materials: Vec::new(),
+            traffic_material: 0,
             vehicle: Vehicle::new(Vec3::ZERO, 0.0, 0.16, 2.6),
             models: HashMap::new(),
             physics: HashMap::new(),
@@ -607,6 +612,17 @@ impl Game {
                     self.all_lights = l;
                     self.vis_view = None;
                 }
+                LoadEvent::Materials(list) => {
+                    self.renderer.set_materials(&self.gpu, &list);
+                    self.paint_materials = PAINT_MATERIALS
+                        .iter()
+                        .filter_map(|(name, rgb)| {
+                            let id = list.iter().position(|m| m.name == *name)? as u16 + 1;
+                            Some((*rgb, id))
+                        })
+                        .collect();
+                    self.traffic_material = list.iter().position(|m| m.name == "TRAFFIC").map_or(0, |i| i as u16 + 1);
+                }
                 LoadEvent::Visibility(v) => {
                     let mut listed = Vec::new();
                     for &s in v.iter().flat_map(|v| v.lists.values()).flatten() {
@@ -915,6 +931,13 @@ impl Game {
         self.groups_for = Some(track);
     }
 
+    /// The regular paint material closest in colour to `rgb` (the game's paints each have
+    /// their own light material).
+    fn paint_material(&self, rgb: [f32; 3]) -> u16 {
+        let d = |c: [f32; 3]| (0..3).map(|k| (c[k] - rgb[k]).powi(2)).sum::<f32>();
+        self.paint_materials.iter().min_by(|a, b| d(a.0).total_cmp(&d(b.0))).map_or(0, |p| p.1)
+    }
+
     /// Like the original's visible section manager: draws only the sections listed for
     /// the drivable section the camera is on, and keeps collision for the sections seen
     /// from wherever a car is (so a car out of view still has its road under it).
@@ -1199,7 +1222,8 @@ impl Game {
             let wheels = wheel_transforms(&self.vehicle, t, &m.wheels);
             let parts = self.cfg.parts_for(car_name(self.player_car.as_deref().unwrap_or("")));
             let glass = TINTS.get((parts.tint as usize).wrapping_sub(1)).map_or([1.0; 3], |t| t.1);
-            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light, glass });
+            let paint_material = self.paint_material(self.cfg.paint);
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light, glass, paint_material });
             push_car_glows(&mut glows, m, t, self.brake_light, right, up);
             if let Some(&(_, color)) = NEONS.get((parts.neon as usize).wrapping_sub(1)) {
                 push_neon(&mut glows, m, t, color);
@@ -1209,7 +1233,8 @@ impl Game {
             let Some(m) = self.models.get(&o.model) else { continue };
             let t = o.vehicle.transform();
             let wheels = wheel_transforms(&o.vehicle, t, &m.wheels);
-            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: o.paint, skin: None, brake: o.brake_light, glass: [1.0; 3] });
+            let paint_material = self.paint_material(o.paint);
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: o.paint, skin: None, brake: o.brake_light, glass: [1.0; 3], paint_material });
             if near(o.vehicle.pos) {
                 push_car_glows(&mut glows, m, t, o.brake_light, right, up);
             }
@@ -1219,7 +1244,8 @@ impl Game {
             let t = c.vehicle.transform();
             let wheels = wheel_transforms(&c.vehicle, t, &m.wheels);
             let skin = m.skins.get(c.skin).copied();
-            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: [0.5; 3], skin, brake: c.brake_light, glass: [1.0; 3] });
+            let paint_material = self.traffic_material;
+            cars.push(CarDraw { model: m.id, transform: t, wheels, paint: [0.5; 3], skin, brake: c.brake_light, glass: [1.0; 3], paint_material });
             if near(c.vehicle.pos) {
                 push_car_glows(&mut glows, m, t, c.brake_light, right, up);
             }
@@ -1440,6 +1466,19 @@ fn headlight_projector(m: &ModelInfo, t: Mat4) -> Mat4 {
     let proj = Mat4::perspective_rh(HEADLIGHT_FOV_Y.to_radians(), 2.0, 0.3, 120.0);
     proj * Mat4::look_to_rh(eye, dir, Vec3::Z)
 }
+
+/// The game's regular paints and the colour each stands for.
+const PAINT_MATERIALS: [(&str, [f32; 3]); 9] = [
+    ("REGPAINTBLACK", [0.03, 0.03, 0.03]),
+    ("REGPAINTWHITE", [0.9, 0.9, 0.9]),
+    ("REGPAINTGRAY", [0.45, 0.45, 0.45]),
+    ("REGPAINTRED", [0.75, 0.05, 0.05]),
+    ("REGPAINTBLUE", [0.05, 0.15, 0.75]),
+    ("REGPAINTGREEN", [0.05, 0.55, 0.12]),
+    ("REGPAINTYELLOW", [0.9, 0.8, 0.05]),
+    ("REGPAINTORANGE", [0.95, 0.4, 0.05]),
+    ("REGPAINTPINK", [0.9, 0.35, 0.6]),
+];
 
 /// Headlight projector set-up (the game sets these at run time; chosen so the beam
 /// pattern covers the lane ahead).

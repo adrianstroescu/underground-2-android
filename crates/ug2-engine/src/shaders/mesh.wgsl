@@ -15,6 +15,20 @@ struct Globals {
     // The player's headlight projector and its colour (w = 1 when on).
     headlight_vp: mat4x4<f32>,
     headlight_color: vec4<f32>,
+    // Car lighting: the CAR effect's HarmonicCoeff (second-order SH in car space).
+    sh: array<vec4<f32>, 10>,
+};
+
+// A light material as the CAR effect's constants.
+struct Material {
+    diffuse_min: vec4<f32>,
+    diffuse_range: vec4<f32>,
+    // w = specular power
+    specular_min: vec4<f32>,
+    // w = envmap power
+    specular_range: vec4<f32>,
+    envmap_min: vec4<f32>,
+    envmap_range: vec4<f32>,
 };
 
 struct Model {
@@ -25,12 +39,15 @@ struct Model {
     params: vec4<f32>,
     // Light emitted on top of the lit colour (lamps), as a multiple of the texture.
     emissive: vec4<f32>,
+    // x = light material of the car paint
+    extra: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var refl_tex: texture_2d<f32>;
 @group(0) @binding(2) var refl_samp: sampler;
 @group(0) @binding(3) var headlight_tex: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> materials: array<Material, 192>;
 @group(1) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(1) @binding(1) var s_diffuse: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
@@ -50,10 +67,15 @@ struct VsOut {
     @location(3) world: vec3<f32>,
     // Distance along the view direction (fog, as the game's per-vertex fog).
     @location(4) depth: f32,
+    // Light material of the draw (cars), from the instance index.
+    @location(5) @interpolate(flat) material: u32,
+    // Model-space normal and eye direction (the car effect lights in car space).
+    @location(6) local_normal: vec3<f32>,
+    @location(7) local_view: vec3<f32>,
 };
 
 @vertex
-fn vs_main(v: VsIn) -> VsOut {
+fn vs_main(v: VsIn, @builtin(instance_index) material: u32) -> VsOut {
     let world = m.model * vec4<f32>(v.pos, 1.0);
     var o: VsOut;
     o.clip = g.view_proj * world;
@@ -62,7 +84,29 @@ fn vs_main(v: VsIn) -> VsOut {
     o.normal = (m.model * vec4<f32>(v.normal, 0.0)).xyz;
     o.world = world.xyz;
     o.depth = o.clip.w;
+    o.material = material;
+    o.local_normal = v.normal;
+    // Eye in model space (the model matrix is a rotation and a translation).
+    let r = mat3x3<f32>(m.model[0].xyz, m.model[1].xyz, m.model[2].xyz);
+    o.local_view = transpose(r) * (g.cam_pos.xyz - m.model[3].xyz) - v.pos;
     return o;
+}
+
+// The CAR effect's lighting: second-order spherical harmonics in car space.
+fn sh_eval(n: vec3<f32>) -> vec4<f32> {
+    return g.sh[0] + g.sh[1] * (n.x * n.x) + g.sh[2] * (n.y * n.y) + g.sh[3] * (n.z * n.z)
+        + g.sh[4] * (n.x * n.y) + g.sh[5] * (n.x * n.z) + g.sh[6] * (n.z * n.y)
+        + g.sh[7] * n.x + g.sh[8] * n.y + g.sh[9] * n.z;
+}
+
+// What a car reflects (the game uses a cube map of its surroundings): night sky above,
+// the fog colour at the horizon, dark street below.
+fn env_color(r: vec3<f32>) -> vec3<f32> {
+    let horizon = g.fog_color.rgb;
+    if (r.z > 0.0) {
+        return mix(horizon, vec3<f32>(0.20, 0.17, 0.15), clamp(r.z * 2.0, 0.0, 1.0));
+    }
+    return mix(horizon, vec3<f32>(0.04, 0.04, 0.05), clamp(-r.z * 4.0, 0.0, 1.0));
 }
 
 // Light the player's headlights throw on world geometry (the game's worldheadlight
@@ -99,31 +143,42 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         // Unlit (shadows, decals).
         rgb = tex.rgb * m.tint.rgb;
     } else if (m.params.x > 0.5) {
-        // Car: moonlight + city ambient, specular highlight and a cheap sky reflection.
-        let n = normalize(i.normal);
-        let l = normalize(g.light_dir.xyz);
-        let v = normalize(g.cam_pos.xyz - i.world);
-        let diff = max(dot(n, l), 0.0);
-        let h = normalize(l + v);
-        let spec = pow(max(dot(n, h), 0.0), 60.0) * 0.8;
-        let fres = pow(1.0 - clamp(abs(dot(n, v)), 0.0, 1.0), 4.0);
-        let r = reflect(-v, n);
-        // Night sky above, city glow at the horizon, dark street below.
-        let up = r.z * 0.5 + 0.5;
-        let env = mix(mix(vec3<f32>(0.03, 0.035, 0.05), vec3<f32>(0.42, 0.40, 0.45), smoothstep(0.35, 0.5, up)),
-                      vec3<f32>(0.20, 0.27, 0.42), smoothstep(0.55, 0.9, up));
+        // Car, as the game's CAR effect (vertex terms per pixel here).
         var base = tex.rgb * m.tint.rgb;
+        var base_a = a;
         if (m.emissive.w > 0.5) {
             // Paint with the car's detail atlas laid over it.
             base = mix(m.tint.rgb, tex.rgb, tex.a);
-            a = m.tint.a;
+            base_a = m.tint.a;
+            a = base_a;
         }
+        var id = i.material;
+        if (id == 65535u) {
+            id = u32(m.extra.x);
+        }
+        let mat = materials[min(id, 191u)];
+        let n = normalize(i.local_normal);
+        let v = normalize(i.local_view);
+        let ndv = max(dot(v, n), 0.01);
+        // Diffuse: SH on the normal, scaled from DiffuseMin to Max by N.V.
+        let diff = sh_eval(n).rgb * (mat.diffuse_min.rgb + ndv * mat.diffuse_range.rgb) * 0.5;
+        let diff_a = (mat.diffuse_min.a + ndv * mat.diffuse_range.a) * 0.5;
+        // Specular: SH on the reflection vector, its alpha raised to the power.
+        let r = 2.0 * ndv * n - v;
+        let sr = sh_eval(r);
+        let spec_light = sr.rgb * pow(max(clamp(sr.a, 0.0, 1.0), 1e-4), mat.specular_min.w);
+        let spec = spec_light * (mat.specular_min.rgb + pow(ndv, mat.specular_min.w) * mat.specular_range.rgb) * 0.5;
+        // Envmap, weighted from EnvmapMin to Max by N.V^EnvmapPower.
+        let rw = normalize((m.model * vec4<f32>(r, 0.0)).xyz);
+        let env_k = mat.envmap_min.rgb + pow(ndv, mat.specular_range.w) * mat.envmap_range.rgb;
+        let shine = 2.0 * env_color(rw) * env_k + spec;
+        let lit = 2.0 * base * diff;
+        let lit_a = 2.0 * base_a * diff_a;
+        // The texture alpha times the diffuse alpha (a fresnel term) weights the shine.
+        rgb = 2.0 * shine * lit_a + lit;
         if (m.params.x > 1.5) {
-            // Glass: mostly reflection; more opaque at grazing angles.
-            rgb = base * g.ambient.rgb + env * (0.35 + 0.65 * fres) + vec3<f32>(spec * 1.2);
-            a = clamp(max(a, 0.55) + fres * 0.4, 0.0, 0.95);
-        } else {
-            rgb = base * (g.ambient.rgb + diff * 0.75) + vec3<f32>(spec) + env * (0.12 + 0.6 * fres);
+            // Glass blends with the alpha the effect computes.
+            a = clamp(lit_a, 0.0, 1.0);
         }
         rgb = rgb + tex.rgb * m.emissive.rgb;
     } else {

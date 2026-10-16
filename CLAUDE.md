@@ -194,6 +194,19 @@ The traces live in `D:/GAME install/apitrace/traces/`.
   - car reflection: a 128 render-target cube map, plus a static 256 cube map.
   - The output is LDR (A8R8G8B8).
 
+### Car shading in the port
+
+- `ug2-formats/material.rs` parses the light materials. They are checked against the
+  capture: every material the game sent matches, and specular power is data × 1.1.
+- Each car mesh group gets its material from its shader hash (`DrawRange::material`,
+  id = index + 1). CARSKIN becomes `PAINT_MATERIAL` and is resolved per car to the
+  nearest REGPAINT* colour (`lib.rs::PAINT_MATERIALS`). Traffic cars use TRAFFIC.
+- The id reaches the shader as the draw's instance index. `mesh.wgsl` evaluates the
+  CAR effect per pixel in car space.
+- The SH is still one captured set (`render.rs::CAR_SH`). The game builds one per car
+  from nearby lights: 21 different sets in one frame.
+- The envmap is a gradient; the game renders a 128 px cube map.
+
 ### Gameplay data
 
 - Race lines come from `Routes<track><F|B>.bin`, chained by race distance

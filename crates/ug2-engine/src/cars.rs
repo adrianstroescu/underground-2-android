@@ -12,7 +12,8 @@ use ug2_formats::fs::GameDir;
 use ug2_formats::solid::{find_solid_lists, Solid};
 use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 
-use crate::assets::{append_solid, blend_for, finish_mesh, Blend, GpuVertex, MeshData, Role, PAINT};
+use crate::assets::{append_solid, blend_for, finish_mesh, Blend, GpuVertex, MeshData, Role, PAINT, PAINT_MATERIAL};
+use ug2_formats::material::{parse_light_materials, LightMaterial};
 use ug2_formats::parts::{PartLibrary, SPOILER_MARKER};
 
 /// Data shared by every car: the car table and textures any car may reference.
@@ -20,6 +21,9 @@ pub struct SharedCarData {
     pub types: Vec<CarTypeInfo>,
     /// CARS/TEXTURES.BIN (traffic skins, shadows) and GLOBALB (window, chrome, driver...).
     textures: HashMap<u32, Texture>,
+    /// GLOBALB light materials; a mesh group's shader hash picks one (id = index + 1).
+    pub materials: Vec<LightMaterial>,
+    material_ids: HashMap<u32, u16>,
 }
 
 impl SharedCarData {
@@ -37,7 +41,9 @@ impl SharedCarData {
                 textures.insert(t.hash, t);
             }
         }
-        Self { types, textures }
+        let materials = global_b.as_ref().map(|g| parse_light_materials(g)).unwrap_or_default();
+        let material_ids = materials.iter().enumerate().map(|(i, m)| (m.hash, i as u16 + 1)).collect();
+        Self { types, textures, materials, material_ids }
     }
 
     /// Stock performance of every car with data.
@@ -158,6 +164,17 @@ pub fn load_car(
         }
     };
 
+    // Mesh groups name their light material by the solid's shader hash. CARSKIN is the
+    // body paint, chosen per car when drawing; groups without one use DEFAULT.
+    let default_material = shared.material_ids.get(&bin_hash("DEFAULT")).copied().unwrap_or(0);
+    let carskin = bin_hash("CARSKIN");
+    let material_of = |shader: u32| -> u16 {
+        if shader == carskin {
+            return PAINT_MATERIAL;
+        }
+        shared.material_ids.get(&shader).copied().unwrap_or(default_material)
+    };
+
     // Each part: the first candidate solid the car has (styles fall back to stock).
     let parts: Vec<(u32, PartKind)> = if traffic {
         traffic_parts(name).into_iter().map(|(n, k)| (bin_hash(&n), k)).collect()
@@ -182,7 +199,7 @@ pub fn load_car(
         }
         match kind {
             PartKind::Body => {
-                append_solid(s, &Mat4::IDENTITY, &mut body_v, &mut body_b, &texture_of, &mut body_box);
+                append_solid(s, &Mat4::IDENTITY, &mut body_v, &mut body_b, &texture_of, &material_of, &mut body_box);
                 if s.name.contains("_KIT00_HEADLIGHT_") {
                     headlights.push(center(s));
                 } else if s.name.contains("_KIT00_BRAKELIGHT") {
@@ -202,9 +219,9 @@ pub fn load_car(
                         }
                         let radius = ((r.bbox_max[2] - r.bbox_min[2]) * 0.5).max(0.05);
                         let m = Mat4::from_scale(Vec3::splat(stock_radius / radius));
-                        append_solid(r, &m, &mut v, &mut b, &texture_of, &mut bb);
+                        append_solid(r, &m, &mut v, &mut b, &texture_of, &material_of, &mut bb);
                     }
-                    None => append_solid(s, &Mat4::IDENTITY, &mut v, &mut b, &texture_of, &mut bb),
+                    None => append_solid(s, &Mat4::IDENTITY, &mut v, &mut b, &texture_of, &material_of, &mut bb),
                 }
                 wheel = Some(finish_mesh(v, b, bb));
             }
@@ -223,7 +240,7 @@ pub fn load_car(
                 used.insert(texture_of(t, 0).0);
             }
             let at = Mat4::from_cols_array(&m.matrix);
-            append_solid(sp, &at, &mut body_v, &mut body_b, &texture_of, &mut body_box);
+            append_solid(sp, &at, &mut body_v, &mut body_b, &texture_of, &material_of, &mut body_box);
         }
     }
     let (bmin, bmax) = body_box;
@@ -350,7 +367,7 @@ fn shadow_quad(tex: u32, min: Vec3, max: Vec3, z: f32) -> MeshData {
     };
     let vertices = vec![v(-1.0, 1.0, 0.0, 0.0), v(1.0, 1.0, 1.0, 0.0), v(1.0, -1.0, 1.0, 1.0), v(-1.0, -1.0, 0.0, 1.0)];
     let mut buckets = HashMap::new();
-    buckets.insert((Blend::Blend, tex, Role::Shadow), vec![0, 1, 2, 0, 2, 3]);
+    buckets.insert((Blend::Blend, tex, Role::Shadow, 0), vec![0, 1, 2, 0, 2, 3]);
     finish_mesh(vertices, buckets, (Vec3::new(cx - hx, cy - hy, z), Vec3::new(cx + hx, cy + hy, z)))
 }
 

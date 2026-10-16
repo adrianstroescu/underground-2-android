@@ -15,6 +15,7 @@ pub mod dxt;
 pub mod fs;
 pub mod hash;
 pub mod light;
+pub mod material;
 pub mod parts;
 pub mod route;
 pub mod scenery;

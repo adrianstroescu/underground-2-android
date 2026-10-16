@@ -96,6 +96,8 @@ struct Globals {
     /// The player's headlight projector (world to clip) and its colour (w = 1 when on).
     headlight_vp: [[f32; 4]; 4],
     headlight_color: [f32; 4],
+    /// Car lighting: the CAR effect's HarmonicCoeff (second-order SH in car space).
+    sh: [[f32; 4]; 10],
 }
 
 #[repr(C)]
@@ -105,7 +107,41 @@ struct ModelUniform {
     tint: [f32; 4],
     params: [f32; 4],
     emissive: [f32; 4],
+    /// x = light material id of the car paint.
+    extra: [f32; 4],
 }
+
+/// One light material as the CAR effect's constants (see `ug2_formats::material`).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuMaterial {
+    diffuse_min: [f32; 4],
+    diffuse_range: [f32; 4],
+    /// w = specular power.
+    specular_min: [f32; 4],
+    /// w = envmap power.
+    specular_range: [f32; 4],
+    envmap_min: [f32; 4],
+    envmap_range: [f32; 4],
+}
+
+/// Material table size; id 0 is "none".
+const MATERIALS: usize = 192;
+
+/// HarmonicCoeff the PC game sent for a car in a City Hall race at night (apitrace).
+/// The game builds these per car from the lights around it.
+const CAR_SH: [[f32; 4]; 10] = [
+    [0.2771666, 0.2771666, 0.2771666, 0.3640937],
+    [-0.04462969, -0.04462969, -0.04462969, -0.05862677],
+    [0.03838885, 0.03838885, 0.03838885, 0.05042865],
+    [0.1475934, 0.1475934, 0.1475934, 0.1938827],
+    [0.2480376, 0.2480376, 0.2480376, 0.3258289],
+    [-0.00464404, -0.00464404, -0.00464404, -0.006100534],
+    [-0.04610886, -0.04610886, -0.04610886, -0.06056986],
+    [0.0758772, 0.0758772, 0.0758772, 0.09967436],
+    [-0.02627384, -0.02627384, -0.02627384, -0.03451402],
+    [0.4666717, 0.4666717, 0.4666717, 0.6130328],
+];
 
 /// Shading modes (`params.x` in mesh.wgsl).
 const MODE_WORLD: f32 = 0.0;
@@ -153,6 +189,8 @@ pub struct CarDraw {
     pub brake: f32,
     /// Window tint colour (white = stock).
     pub glass: [f32; 3],
+    /// Light material of the body paint (`CARSKIN`), as a `DrawRange::material` id.
+    pub paint_material: u16,
 }
 
 struct GpuMesh {
@@ -205,6 +243,8 @@ pub struct Renderer {
     dummy_view: wgpu::TextureView,
     /// The game's HEADLIGHTS beam pattern, once the world textures are in.
     headlight_view: Option<wgpu::TextureView>,
+    /// The car light materials (`GpuMaterial` x MATERIALS).
+    material_buf: wgpu::Buffer,
     pipe_refl_opaque: wgpu::RenderPipeline,
     pipe_refl_sky: wgpu::RenderPipeline,
     pipe_refl_add: wgpu::RenderPipeline,
@@ -306,6 +346,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                uniform_entry(4, false, (std::mem::size_of::<GpuMaterial>() * MATERIALS) as u64),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -368,7 +409,14 @@ impl Renderer {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let globals_bg = globals_bind_group(device, &globals_layout, &globals_buf, &dummy_view, &refl_sampler, &dummy_view);
+        let material_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("materials"),
+            size: (std::mem::size_of::<GpuMaterial>() * MATERIALS) as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let globals_bg =
+            globals_bind_group(device, &globals_layout, &globals_buf, &dummy_view, &refl_sampler, &dummy_view, &material_buf);
         let refl_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("reflection globals"),
             size: std::mem::size_of::<Globals>() as u64,
@@ -376,7 +424,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let refl_globals_bg =
-            globals_bind_group(device, &globals_layout, &refl_globals_buf, &dummy_view, &refl_sampler, &dummy_view);
+            globals_bind_group(device, &globals_layout, &refl_globals_buf, &dummy_view, &refl_sampler, &dummy_view, &material_buf);
         let model_slots = WORLD_SLOTS + CAR_SLOTS * 8;
         let (model_buf, model_bg) = create_model_buffer(device, &model_layout, model_slots);
         let glow_capacity = 64 * 1024;
@@ -549,6 +597,7 @@ impl Renderer {
             reflection: None,
             dummy_view,
             headlight_view: None,
+            material_buf,
             pipe_refl_opaque,
             pipe_refl_sky,
             pipe_refl_add,
@@ -601,7 +650,9 @@ impl Renderer {
     fn rebind_globals(&mut self, gpu: &Gpu) {
         let head = self.headlight_view.as_ref().unwrap_or(&self.dummy_view);
         let refl = self.reflection.as_ref().map_or(&self.dummy_view, |r| &r.color);
-        self.globals_bg = globals_bind_group(&gpu.device, &self.globals_layout, &self.globals_buf, refl, &self.refl_sampler, head);
+        let mats = &self.material_buf;
+        self.globals_bg =
+            globals_bind_group(&gpu.device, &self.globals_layout, &self.globals_buf, refl, &self.refl_sampler, head, mats);
         self.refl_globals_bg = globals_bind_group(
             &gpu.device,
             &self.globals_layout,
@@ -609,7 +660,25 @@ impl Renderer {
             &self.dummy_view,
             &self.refl_sampler,
             head,
+            mats,
         );
+    }
+
+    /// Uploads the car light materials; `DrawRange::material` n is `materials[n - 1]`.
+    pub fn set_materials(&mut self, gpu: &Gpu, materials: &[ug2_formats::material::LightMaterial]) {
+        let mut table = vec![GpuMaterial::zeroed(); MATERIALS];
+        for (i, m) in materials.iter().take(MATERIALS - 1).enumerate() {
+            let v3 = |a: [f32; 3], w: f32| [a[0], a[1], a[2], w];
+            table[i + 1] = GpuMaterial {
+                diffuse_min: m.diffuse_min,
+                diffuse_range: m.diffuse_range,
+                specular_min: v3(m.specular_min, m.specular_power),
+                specular_range: v3(m.specular_range, m.envmap_power),
+                envmap_min: v3(m.envmap_min, 0.0),
+                envmap_range: v3(m.envmap_range, 0.0),
+            };
+        }
+        gpu.queue.write_buffer(&self.material_buf, 0, bytemuck::cast_slice(&table));
     }
 
     pub fn texture_count(&self) -> usize {
@@ -726,6 +795,7 @@ impl Renderer {
             clip: [0.0, 0.0, 0.0, 1.0],
             headlight_vp: f.headlight.map_or(Mat4::ZERO, |h| h.0).to_cols_array_2d(),
             headlight_color: f.headlight.map_or([0.0; 4], |h| [h.1[0], h.1[1], h.1[2], 1.0]),
+            sh: CAR_SH,
         };
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         // Mirror the camera in the street plane z = h and clip what is below it.
@@ -751,6 +821,7 @@ impl Renderer {
             tint,
             params,
             emissive,
+            extra: [0.0; 4],
         };
         let one = [1.0, 1.0, 1.0, 1.0];
         let none = [0.0; 4];
@@ -765,6 +836,7 @@ impl Renderer {
         slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.0, 1.0, 1.0], none));
         slots.push(slot(Mat4::IDENTITY, one, [MODE_ROAD, 0.0, 1.0, vs], none));
         for c in f.cars {
+            let first = slots.len();
             let t = c.transform;
             let p = c.paint;
             let lit = [MODE_CAR, 0.5, 1.0, 1.0];
@@ -783,6 +855,9 @@ impl Renderer {
             }
             // emissive.w flags "blend paint and texture by the texture's alpha".
             slots.push(slot(t, [p[0], p[1], p[2], 1.0], lit, [0.0, 0.0, 0.0, 1.0]));
+            for s in &mut slots[first..] {
+                s.extra[0] = c.paint_material as f32;
+            }
         }
         if slots.len() as u32 > self.model_slots {
             self.model_slots = (slots.len() as u32).next_power_of_two();
@@ -1153,6 +1228,7 @@ fn globals_bind_group(
     reflection: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
     headlight: &wgpu::TextureView,
+    materials: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("globals"),
@@ -1162,6 +1238,7 @@ fn globals_bind_group(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(reflection) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(headlight) },
+            wgpu::BindGroupEntry { binding: 4, resource: materials.as_entire_binding() },
         ],
     })
 }
@@ -1213,7 +1290,9 @@ fn draw_ranges(
         }
         let tex = if texture == PAINT { white } else { textures.get(&texture).unwrap_or(white) };
         pass.set_bind_group(1, tex, &[]);
-        pass.draw_indexed(r.first_index..r.first_index + r.index_count, 0, 0..1);
+        // The instance index carries the range's light material to the shader.
+        let mat = r.material as u32;
+        pass.draw_indexed(r.first_index..r.first_index + r.index_count, 0, mat..mat + 1);
         n += 1;
     }
     n

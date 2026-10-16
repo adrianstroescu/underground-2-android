@@ -68,6 +68,9 @@ pub struct DrawRange {
     pub texture: u32,
     pub blend: Blend,
     pub role: Role,
+    /// Light material (index + 1 in the renderer's table; 0 = none, PAINT_MATERIAL =
+    /// the car's paint).
+    pub material: u16,
     pub first_index: u32,
     pub index_count: u32,
 }
@@ -127,6 +130,8 @@ pub enum LoadEvent {
     Collision(CollisionWorld),
     Spawn { pos: Vec3, yaw: f32 },
     Section(SectionAsset),
+    /// The car light materials (GLOBALB), in the order `DrawRange::material` counts them.
+    Materials(Vec<ug2_formats::material::LightMaterial>),
     /// Street lamps and other world lights, drawn as glows at night, with the number of
     /// the streaming section holding each.
     Lights(Vec<(u16, ug2_formats::light::WorldLight)>),
@@ -173,6 +178,7 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
         .name("ug2-loader".into())
         .spawn(move || {
             let shared = SharedCarData::load(&game);
+            let _ = tx.send(LoadEvent::Materials(shared.materials.clone()));
             let racers = shared.names(CarUsage::Racer);
             let traffic = shared.names(CarUsage::Traffic);
             let _ = tx.send(LoadEvent::CarList { racers, traffic, perfs: shared.perfs() });
@@ -412,7 +418,10 @@ fn d3d_color(c: u32) -> [u8; 4] {
     [(c >> 16) as u8, (c >> 8) as u8, c as u8, (c >> 24) as u8]
 }
 
-pub type Buckets = HashMap<(Blend, u32, Role), Vec<u32>>;
+pub type Buckets = HashMap<(Blend, u32, Role, u16), Vec<u32>>;
+
+/// Material id of the car body paint (`CARSKIN`), resolved per car when drawing.
+pub const PAINT_MATERIAL: u16 = u16::MAX;
 
 /// Appends a solid's mesh transformed by `m`, bucketing indices by texture.
 /// `texture_of(texture, shader)` gets each group's texture and shader name hashes.
@@ -422,6 +431,7 @@ pub fn append_solid(
     vertices: &mut Vec<GpuVertex>,
     buckets: &mut Buckets,
     texture_of: &dyn Fn(u32, u32) -> (u32, Blend, Role),
+    material_of: &dyn Fn(u32) -> u16,
     bbox: &mut (Vec3, Vec3),
 ) {
     let Some(mesh) = &s.mesh else { return };
@@ -444,14 +454,14 @@ pub fn append_solid(
         let hash = s.textures.get(g.texture as usize).copied().unwrap_or(0);
         let shader = s.shaders.get(g.shader as usize).copied().unwrap_or(0);
         let (tex, blend, role) = texture_of(hash, shader);
-        let out = buckets.entry((blend, tex, role)).or_default();
+        let out = buckets.entry((blend, tex, role, material_of(shader))).or_default();
         let idx = &mesh.indices[g.first_index as usize..(g.first_index + g.index_count) as usize];
         out.extend(idx.iter().map(|&i| base + i as u32));
     }
 }
 
 pub fn finish_mesh(vertices: Vec<GpuVertex>, buckets: Buckets, bbox: (Vec3, Vec3)) -> MeshData {
-    let mut keys: Vec<(Blend, u32, Role)> = buckets.keys().copied().collect();
+    let mut keys: Vec<(Blend, u32, Role, u16)> = buckets.keys().copied().collect();
     keys.sort();
     let mut indices = Vec::new();
     let mut ranges = Vec::new();
@@ -462,6 +472,7 @@ pub fn finish_mesh(vertices: Vec<GpuVertex>, buckets: Buckets, bbox: (Vec3, Vec3
             texture: k.1,
             blend: k.0,
             role: k.2,
+            material: k.3,
             first_index: indices.len() as u32,
             index_count: idx.len() as u32,
         });
@@ -517,7 +528,7 @@ fn build_section_mesh(
             (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal)
         };
         let m = Mat4::from_cols_array(&inst.matrix());
-        append_solid(solid, &m, &mut vertices, &mut buckets, &texture_of, &mut bbox);
+        append_solid(solid, &m, &mut vertices, &mut buckets, &texture_of, &|_| 0, &mut bbox);
     }
     finish_mesh(vertices, buckets, bbox)
 }
@@ -536,7 +547,7 @@ fn build_sky_mesh(sc: &ScenerySection, solids: &HashMap<u32, Arc<Solid>>, blend_
         let Some(solid) = instance_solid(sc, inst, solids) else { continue };
         let pos = Vec3::from(inst.position);
         let m = Mat4::from_translation(-pos) * Mat4::from_cols_array(&inst.matrix());
-        append_solid(solid, &m, &mut vertices, &mut buckets, &texture_of, &mut bbox);
+        append_solid(solid, &m, &mut vertices, &mut buckets, &texture_of, &|_| 0, &mut bbox);
     }
     finish_mesh(vertices, buckets, bbox)
 }
