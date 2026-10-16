@@ -25,6 +25,7 @@ pub mod track;
 pub mod visible;
 pub mod envmap;
 pub mod movie;
+pub mod lang;
 
 pub use chunk::{Chunk, ChunkIter};
 pub use hash::bin_hash;
