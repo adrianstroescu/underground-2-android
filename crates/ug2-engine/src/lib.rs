@@ -13,6 +13,7 @@ mod frontend;
 pub mod hud;
 pub mod input;
 pub mod menu;
+
 pub mod play;
 pub mod post;
 pub mod race;
@@ -126,6 +127,8 @@ pub struct Game {
     physics: HashMap<String, ModelPhysics>,
     racers: Vec<String>,
     traffic_names: Vec<String>,
+    /// Rim styles offered in the garage.
+    rim_names: Vec<String>,
     /// Stock performance per car from its real data.
     base_perfs: HashMap<String, vehicle::Perf>,
     requested: Vec<String>,
@@ -219,6 +222,7 @@ impl Game {
             racers: Vec::new(),
             traffic_names: Vec::new(),
             base_perfs: HashMap::new(),
+            rim_names: Vec::new(),
             requested: Vec::new(),
             player_car: None,
             pending_car: Some(model_key(&cfg.car, &cfg.parts_for(&cfg.car))),
@@ -457,6 +461,7 @@ impl Game {
                     self.engine_sounds.insert(car, sound);
                 }
                 LoadEvent::Roads(r) => self.roads = Some(*r),
+                LoadEvent::Rims(r) => self.rim_names = r,
                 LoadEvent::Collision(c) => self.world = Some(c),
                 LoadEvent::Lights(l) => self.lights = l,
                 LoadEvent::Spawn { pos, yaw } => {

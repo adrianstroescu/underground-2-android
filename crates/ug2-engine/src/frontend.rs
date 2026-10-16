@@ -61,6 +61,8 @@ enum Row {
     Widebody,
     Hood,
     Lights,
+    Rims,
+    Spoiler,
     BuyCar,
     BuyNow,
     Upgrade(usize),
@@ -102,7 +104,7 @@ impl Game {
                 } else {
                     v.push(Row::Car);
                 }
-                v.extend([Row::Kit, Row::Widebody, Row::Hood, Row::Lights, Row::Color]);
+                v.extend([Row::Kit, Row::Widebody, Row::Hood, Row::Lights, Row::Rims, Row::Spoiler, Row::Color]);
                 v.push(if self.in_career { Row::BackToCareer } else { Row::Back });
                 v
             }
@@ -194,6 +196,23 @@ impl Game {
                 Row::StartCareerRace => MenuItem::button("START RACE"),
                 Row::Garage => MenuItem::button("GARAGE"),
                 Row::OwnedCar => MenuItem::choice("MY CAR", self.car_label()),
+                Row::Rims => {
+                    let p = self.cfg.parts_for(&self.current_car());
+                    let value = match p.rim {
+                        0 => "STOCK".to_string(),
+                        i => self.rim_names.get(i as usize - 1).cloned().unwrap_or_else(|| format!("RIM {i}")),
+                    };
+                    MenuItem::choice("RIMS", value)
+                }
+                Row::Spoiler => {
+                    let p = self.cfg.parts_for(&self.current_car());
+                    let value = match (p.spoiler, p.spoiler_cf) {
+                        (0, _) => "STOCK".to_string(),
+                        (s, false) => format!("STYLE {s:02}"),
+                        (s, true) => format!("STYLE {s:02} CARBON"),
+                    };
+                    MenuItem::choice("SPOILER", value)
+                }
                 Row::Kit | Row::Widebody | Row::Hood | Row::Lights => {
                     let p = self.cfg.parts_for(&self.current_car());
                     let (label, v, name) = match *row {
@@ -335,6 +354,18 @@ impl Game {
             Row::Widebody => self.change_part(|p| p.widebody = (p.widebody as i32 + step).rem_euclid(5) as u8),
             Row::Hood => self.change_part(|p| p.hood = (p.hood as i32 + step).rem_euclid(29) as u8),
             Row::Lights => self.change_part(|p| p.lights = (p.lights as i32 + step).rem_euclid(15) as u8),
+            Row::Rims => {
+                let n = self.rim_names.len() as i32 + 1;
+                self.change_part(|p| p.rim = (p.rim as i32 + step).rem_euclid(n) as u16);
+            }
+            Row::Spoiler => self.change_part(|p| {
+                // 0 stock, 1..40 painted, 41..80 carbon.
+                let n = ug2_formats::parts::SPOILER_STYLES as i32;
+                let cur = if p.spoiler == 0 { 0 } else { p.spoiler as i32 + if p.spoiler_cf { n } else { 0 } };
+                let next = (cur + step).rem_euclid(2 * n + 1);
+                p.spoiler_cf = next > n;
+                p.spoiler = if next == 0 { 0 } else { ((next - 1) % n + 1) as u8 };
+            }),
             Row::BackToCareer => {
                 self.screen = Screen::Career;
                 self.menu.selected = 0;

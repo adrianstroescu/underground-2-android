@@ -57,6 +57,12 @@ pub struct PartSet {
     pub hood: u8,
     /// Headlight and brake-light style 1..14.
     pub lights: u8,
+    /// Rim style (1-based index into the rim catalogue), 0 = stock wheels.
+    pub rim: u16,
+    /// Spoiler style 1..40, 0 = stock.
+    pub spoiler: u8,
+    /// Carbon-fibre spoiler.
+    pub spoiler_cf: bool,
 }
 
 impl PartSet {
@@ -66,7 +72,16 @@ impl PartSet {
 
     /// Short key used to tell loaded models apart, e.g. "K03W00H05L02".
     pub fn key(&self) -> String {
-        format!("K{:02}W{:02}H{:02}L{:02}", self.kit, self.widebody, self.hood, self.lights)
+        format!(
+            "K{:02}W{:02}H{:02}L{:02}R{:03}S{:02}{}",
+            self.kit,
+            self.widebody,
+            self.hood,
+            self.lights,
+            self.rim,
+            self.spoiler,
+            if self.spoiler_cf { "C" } else { "" }
+        )
     }
 }
 
@@ -187,7 +202,7 @@ mod tests {
         let Ok(geo) = game.read("CARS/350Z/GEOMETRY.BIN") else { return };
         let solids: Vec<u32> =
             crate::solid::find_solid_lists(&geo).into_iter().flat_map(|l| l.solids).map(|s| s.hash).collect();
-        let parts = PartSet { kit: 3, widebody: 1, hood: 22, lights: 5 };
+        let parts = PartSet { kit: 3, widebody: 1, hood: 22, lights: 5, ..Default::default() };
         for (names, _) in fitted_parts("350Z", &parts) {
             // The preferred (first) candidate should exist for every fitted style.
             assert!(solids.contains(&bin_hash(&names[0])), "missing {}", names[0]);

@@ -108,9 +108,18 @@ impl GameConfig {
                 "vertex_light_scale" => self.vertex_light_scale = f().unwrap_or(self.vertex_light_scale),
                 "version" => {}
                 _ if k.starts_with("parts.") => {
-                    let n: Vec<u8> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-                    if n.len() == 4 {
-                        let p = PartSet { kit: n[0], widebody: n[1], hood: n[2], lights: n[3] };
+                    let n: Vec<u16> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if n.len() >= 4 {
+                        let at = |i: usize| n.get(i).copied().unwrap_or(0);
+                        let p = PartSet {
+                            kit: at(0) as u8,
+                            widebody: at(1) as u8,
+                            hood: at(2) as u8,
+                            lights: at(3) as u8,
+                            rim: at(4),
+                            spoiler: at(5) as u8,
+                            spoiler_cf: at(6) != 0,
+                        };
                         self.parts.insert(k["parts.".len()..].to_string(), p);
                     }
                 }
@@ -128,7 +137,10 @@ impl GameConfig {
         let mut parts = String::new();
         for (car, p) in &self.parts {
             if !p.is_stock() {
-                parts.push_str(&format!("parts.{car} = {}, {}, {}, {}\n", p.kit, p.widebody, p.hood, p.lights));
+                parts.push_str(&format!(
+                    "parts.{car} = {}, {}, {}, {}, {}, {}, {}\n",
+                    p.kit, p.widebody, p.hood, p.lights, p.rim, p.spoiler, p.spoiler_cf as u8
+                ));
             }
         }
         format!(

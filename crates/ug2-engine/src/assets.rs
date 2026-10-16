@@ -17,6 +17,7 @@ use ug2_formats::track::{parse_region, parse_streaming_sections};
 use crate::cars::{load_car, CarModel, SharedCarData};
 use crate::sound::{Effects, EngineSound};
 use crate::collision::CollisionWorld;
+use ug2_formats::parts::PartLibrary;
 use crate::roads::RoadData;
 
 #[repr(C)]
@@ -94,6 +95,8 @@ pub struct PreparedTexture {
 pub enum LoadEvent {
     Progress(String),
     Textures(Vec<PreparedTexture>),
+    /// Rim styles for the garage, in catalogue order (index + 1 = `PartSet::rim`).
+    Rims(Vec<String>),
     /// Car lists from CarTypeInfo.
     CarList { racers: Vec<String>, traffic: Vec<String>, perfs: Vec<(String, crate::vehicle::Perf)> },
     Car(Box<CarModel>),
@@ -146,16 +149,20 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             let racers = shared.names(CarUsage::Racer);
             let traffic = shared.names(CarUsage::Traffic);
             let _ = tx.send(LoadEvent::CarList { racers, traffic, perfs: shared.perfs() });
-            send_car(&game, &shared, &cfg, &cfg.car, &cfg.parts, &tx);
+            // The part catalogue costs a moment to build: only up front if the saved car uses it.
+            let mut lib = None;
+            send_car(&game, &shared, &mut lib, &cfg, &cfg.car, &cfg.parts, &tx);
             let _ = tx.send(LoadEvent::Effects(Box::new(Effects::load(&game))));
             if let Err(e) = load_world(&game, &cfg, &tx) {
                 log::error!("load failed: {e:#}");
                 let _ = tx.send(LoadEvent::Failed(format!("{e:#}")));
                 return;
             }
+            let rims = lib.get_or_insert_with(|| PartLibrary::scan(&game)).rims.iter().map(|r| r.label.clone()).collect();
+            let _ = tx.send(LoadEvent::Rims(rims));
             for req in req_rx {
                 match req {
-                    LoadRequest::Car { name, parts } => send_car(&game, &shared, &cfg, &name, &parts, &tx),
+                    LoadRequest::Car { name, parts } => send_car(&game, &shared, &mut lib, &cfg, &name, &parts, &tx),
                 }
             }
         })
@@ -166,13 +173,16 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
 fn send_car(
     game: &GameDir,
     shared: &SharedCarData,
+    lib: &mut Option<PartLibrary>,
     cfg: &LoaderConfig,
     name: &str,
     parts: &ug2_formats::car::PartSet,
     tx: &Sender<LoadEvent>,
 ) {
     let t0 = std::time::Instant::now();
-    match load_car(game, shared, name, parts) {
+    let needs_lib = parts.rim > 0 || parts.spoiler > 0;
+    let lib = if needs_lib { lib.get_or_insert_with(|| PartLibrary::scan(game)) } else { lib.get_or_insert_with(PartLibrary::default) };
+    match load_car(game, shared, lib, name, parts) {
         Ok((car, textures)) => {
             let prepared = textures.iter().filter_map(|t| prepare_texture(t, cfg.bc_textures)).collect();
             let _ = tx.send(LoadEvent::Textures(prepared));

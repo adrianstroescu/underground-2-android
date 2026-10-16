@@ -13,6 +13,7 @@ use ug2_formats::solid::{find_solid_lists, Solid};
 use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 
 use crate::assets::{append_solid, blend_for, finish_mesh, Blend, GpuVertex, MeshData, Role, PAINT};
+use ug2_formats::parts::{PartLibrary, SPOILER_MARKER};
 
 /// Data shared by every car: the car table and textures any car may reference.
 pub struct SharedCarData {
@@ -93,7 +94,13 @@ fn center(s: &Solid) -> Vec3 {
 }
 
 /// Loads a racer or traffic car. Returns the model and every texture it draws with.
-pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str, fitted: &PartSet) -> anyhow::Result<(CarModel, Vec<Texture>)> {
+pub fn load_car(
+    game: &GameDir,
+    shared: &SharedCarData,
+    lib: &mut PartLibrary,
+    name: &str,
+    fitted: &PartSet,
+) -> anyhow::Result<(CarModel, Vec<Texture>)> {
     let geo = game.read(&format!("CARS/{name}/GEOMETRY.BIN"))?;
     let own: Vec<Texture> = game
         .read(&format!("CARS/{name}/TEXTURES.BIN"))
@@ -102,8 +109,15 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str, fitted: &Par
     let solids: Vec<Solid> = find_solid_lists(&geo).into_iter().flat_map(|l| l.solids).collect();
     let info = shared.info(name);
     let traffic = info.is_some_and(|i| i.usage == CarUsage::Traffic);
+    let stock_radius = info.map_or(0.33, |i| i.wheels[0].radius);
+    // Shared parts (rims, spoiler) fitted to this car, if any.
+    let rim = if traffic || fitted.rim == 0 { None } else { lib.rim(game, fitted.rim, stock_radius) };
+    let spoiler = if traffic || fitted.spoiler == 0 { None } else { lib.spoiler(game, name, fitted.spoiler, fitted.spoiler_cf) };
 
     let mut available: HashMap<u32, &Texture> = shared.textures.iter().map(|(h, t)| (*h, t)).collect();
+    if rim.is_some() || spoiler.is_some() {
+        available.extend(lib.textures.iter().map(|(h, t)| (*h, t)));
+    }
     available.extend(own.iter().map(|t| (t.hash, t)));
     let runtime: HashMap<u32, (Vec<u32>, Material)> =
         runtime_materials(name, fitted.lights).into_iter().map(|(h, r, m)| (h, (r, m))).collect();
@@ -180,7 +194,18 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str, fitted: &Par
             }
             PartKind::FrontWheel => {
                 let (mut v, mut b, mut bb) = (Vec::new(), HashMap::new(), (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)));
-                append_solid(s, &Mat4::IDENTITY, &mut v, &mut b, &texture_of, &mut bb);
+                match &rim {
+                    // Aftermarket rim (with tyre), scaled to the car's wheel size.
+                    Some(r) => {
+                        for &t in &r.textures {
+                            used.insert(texture_of(t).0);
+                        }
+                        let radius = ((r.bbox_max[2] - r.bbox_min[2]) * 0.5).max(0.05);
+                        let m = Mat4::from_scale(Vec3::splat(stock_radius / radius));
+                        append_solid(r, &m, &mut v, &mut b, &texture_of, &mut bb);
+                    }
+                    None => append_solid(s, &Mat4::IDENTITY, &mut v, &mut b, &texture_of, &mut bb),
+                }
                 wheel = Some(finish_mesh(v, b, bb));
             }
             PartKind::FrontBrake | PartKind::RearBrake => {}
@@ -188,6 +213,18 @@ pub fn load_car(game: &GameDir, shared: &SharedCarData, name: &str, fitted: &Par
     }
     if body_v.is_empty() {
         anyhow::bail!("car {name}: no body parts found");
+    }
+    // Spoiler on the SPOILER marker of the base part.
+    if let Some(sp) = &spoiler {
+        let base = bin_hash(&format!("{name}_BASE_A"));
+        let marker = solids.iter().find(|s| s.hash == base).and_then(|s| s.markers.iter().find(|m| m.hash == SPOILER_MARKER));
+        if let Some(m) = marker {
+            for &t in &sp.textures {
+                used.insert(texture_of(t).0);
+            }
+            let at = Mat4::from_cols_array(&m.matrix);
+            append_solid(sp, &at, &mut body_v, &mut body_b, &texture_of, &mut body_box);
+        }
     }
     let (bmin, bmax) = body_box;
     if headlights.is_empty() {
