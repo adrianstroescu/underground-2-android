@@ -1,5 +1,6 @@
 //! Arcade vehicle model, tuned to feel like UG2's street handling: strong grip,
-//! handbrake slides, nitro boost, automatic gearbox. Car space is X forward, Y left, Z up.
+//! handbrake slides, nitro boost, automatic gearbox. Drift events loosen the grip;
+//! drag races use a manual gearbox. Car space is X forward, Y left, Z up.
 
 use glam::{Mat3, Mat4, Quat, Vec3};
 
@@ -53,7 +54,39 @@ pub struct Vehicle {
     /// Wall contacts in the last step (debug telemetry).
     pub wall_hits: u32,
     pub last_wall: u32,
+    /// Drift event handling: less sideways grip, slides keep their speed.
+    pub drift_handling: bool,
+    /// Drag race gearbox: the driver shifts (see [`Vehicle::shift`]).
+    pub manual: bool,
+    /// Extra power after a well-timed shift, fading out.
+    pub shift_boost: f32,
+    /// Engine heat 0..1 from running on the limiter; at 1 the engine blows.
+    pub heat: f32,
+    pub blown: bool,
 }
+
+/// How well a manual shift was timed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shift {
+    Perfect,
+    Good,
+    Early,
+    Late,
+}
+
+impl Shift {
+    pub fn label(self) -> &'static str {
+        match self {
+            Shift::Perfect => "PERFECT SHIFT",
+            Shift::Good => "GOOD SHIFT",
+            Shift::Early => "EARLY SHIFT",
+            Shift::Late => "LATE SHIFT",
+        }
+    }
+}
+
+/// Rev range (0..1) of a perfect upshift.
+pub const PERFECT_SHIFT: std::ops::Range<f32> = 0.86..0.97;
 
 const GRAVITY: f32 = 9.81;
 const MAX_SPEED: f32 = 72.0; // ~260 km/h
@@ -88,7 +121,70 @@ impl Vehicle {
             impact: 0.0,
             wall_hits: 0,
             last_wall: 0,
+            drift_handling: false,
+            manual: false,
+            shift_boost: 0.0,
+            heat: 0.0,
+            blown: false,
         }
+    }
+
+    /// Angle between where the car points and where it goes (radians, 0..PI).
+    pub fn drift_angle(&self) -> f32 {
+        let v = self.vel.truncate();
+        if v.length() < 1.0 {
+            return 0.0;
+        }
+        let f = self.forward().truncate();
+        f.angle_to(v).abs()
+    }
+
+    /// Manual gearbox: one gear up or down. Returns how well an upshift was timed.
+    pub fn shift(&mut self, up: bool) -> Option<Shift> {
+        if !self.manual || self.blown {
+            return None;
+        }
+        if !up {
+            self.gear = (self.gear - 1).max(1);
+            return None;
+        }
+        if self.gear >= 6 {
+            return None;
+        }
+        let q = if PERFECT_SHIFT.contains(&self.rpm) {
+            Shift::Perfect
+        } else if self.rpm >= PERFECT_SHIFT.end {
+            Shift::Late
+        } else if self.rpm >= 0.72 {
+            Shift::Good
+        } else {
+            Shift::Early
+        };
+        self.gear += 1;
+        if q == Shift::Perfect {
+            self.shift_boost = 1.0;
+        }
+        Some(q)
+    }
+
+    /// Back to a fresh engine and automatic gearbox state (new race).
+    pub fn reset_engine(&mut self) {
+        self.gear = 1;
+        self.heat = 0.0;
+        self.blown = false;
+        self.shift_boost = 0.0;
+    }
+
+    /// Top speed of gear `g` (1..=6) for this car.
+    fn gear_top(&self, g: i32) -> f32 {
+        GEAR_TOP[(g.clamp(1, 6) - 1) as usize] * self.perf.top_speed / MAX_SPEED
+    }
+
+    /// Engine speed 0..1 at `v` in gear `g`.
+    fn rpm_in(&self, g: i32, v: f32) -> f32 {
+        let lo = if g <= 1 { 0.0 } else { self.gear_top(g - 1) * 0.6 };
+        let hi = self.gear_top(g);
+        (0.18 + 0.82 * ((v - lo) / (hi - lo)).clamp(0.0, 1.0)).min(1.0)
     }
 
     pub fn forward(&self) -> Vec3 {
@@ -142,7 +238,26 @@ impl Vehicle {
             }
             let base_top = self.perf.top_speed;
             let top = if nitro_on { base_top * (1.1 + 0.05 * self.perf.nitro) } else { base_top };
-            let power = (14.0 * (1.0 - (v_long / top).clamp(0.0, 1.0).powf(1.6)) + 2.0) * self.perf.power;
+            let mut power = (14.0 * (1.0 - (v_long / top).clamp(0.0, 1.0).powf(1.6)) + 2.0) * self.perf.power;
+            if self.manual {
+                // Pull is weak low in the rev range and stops at the limiter; a perfect
+                // shift gives a short kick. Too long on the limiter blows the engine.
+                let rpm = self.rpm_in(self.gear, v_long);
+                let limiter = v_long >= self.gear_top(self.gear) * 0.995;
+                power *= (0.5 + 0.6 * rpm) * (1.0 + 0.3 * self.shift_boost);
+                if limiter || self.blown {
+                    power = 0.0;
+                }
+                if limiter && c.throttle > 0.5 {
+                    self.heat += dt / 3.0;
+                } else {
+                    self.heat = (self.heat - dt / 6.0).max(0.0);
+                }
+                if self.heat >= 1.0 {
+                    self.blown = true;
+                }
+                self.shift_boost = (self.shift_boost - dt / 1.2).max(0.0);
+            }
             let boost = 1.0 + 0.6 * self.perf.nitro;
             let mut accel = c.throttle * power * if nitro_on { boost } else { 1.0 };
             if c.brake > 0.05 {
@@ -165,14 +280,25 @@ impl Vehicle {
 
             self.slip = v_lat.abs();
             // Lateral grip: kill sideways velocity, much less with the handbrake.
-            let grip = if c.handbrake { 1.6 } else { 9.0 * self.perf.grip };
-            v_lat *= (-grip * dt).exp();
+            let grip = match (c.handbrake, self.drift_handling) {
+                (true, false) => 1.6,
+                (true, true) => 1.2,
+                (false, false) => 9.0 * self.perf.grip,
+                (false, true) => 2.8 * self.perf.grip,
+            };
+            let lost = v_lat * (1.0 - (-grip * dt).exp());
+            v_lat -= lost;
+            if self.drift_handling && v_long > 3.0 {
+                // The tyres turn part of the slide into forward speed.
+                v_long += lost.abs() * 0.55;
+            }
 
             // Yaw from a bicycle model; handbrake adds rotation for drifts.
             let steer_angle = self.steer * 0.6;
             let mut target_rate = v_long / self.wheelbase * steer_angle.tan();
-            let max_rate = (MAX_LAT_ACCEL * self.perf.grip / v_long.abs().max(1.0)).max(MIN_YAW_CAP);
-            target_rate = target_rate.clamp(-max_rate, max_rate);
+            let drift = if self.drift_handling { 1.5 } else { 1.0 };
+            let max_rate = (MAX_LAT_ACCEL * drift * self.perf.grip / v_long.abs().max(1.0)).max(MIN_YAW_CAP);
+            target_rate = (target_rate * drift).clamp(-max_rate, max_rate);
             if c.handbrake {
                 target_rate *= 1.6;
             }
@@ -251,7 +377,12 @@ impl Vehicle {
 
         // Automatic gearbox, for the HUD and engine sound later.
         let v = self.speed();
-        if v < -0.5 {
+        if self.manual {
+            self.rpm = if c.throttle > 0.5 && v < 2.0 && self.gear == 1 { 0.6 } else { self.rpm_in(self.gear, v.max(0.0)) };
+            if self.blown {
+                self.rpm = self.rpm.min(0.25);
+            }
+        } else if v < -0.5 {
             self.gear = -1;
             self.rpm = (v.abs() / MAX_REVERSE).min(1.0);
         } else {

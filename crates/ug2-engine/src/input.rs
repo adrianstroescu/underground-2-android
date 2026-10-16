@@ -67,10 +67,12 @@ pub enum Action {
     LookBack,
     Reset,
     Pause,
+    ShiftUp,
+    ShiftDown,
 }
 
 impl Action {
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 12] = [
         Action::Throttle,
         Action::Brake,
         Action::SteerLeft,
@@ -81,6 +83,8 @@ impl Action {
         Action::LookBack,
         Action::Reset,
         Action::Pause,
+        Action::ShiftUp,
+        Action::ShiftDown,
     ];
 
     pub fn name(self) -> &'static str {
@@ -95,6 +99,8 @@ impl Action {
             Action::LookBack => "look_back",
             Action::Reset => "reset",
             Action::Pause => "pause",
+            Action::ShiftUp => "shift_up",
+            Action::ShiftDown => "shift_down",
         }
     }
 
@@ -104,7 +110,7 @@ impl Action {
 
     /// Edge-triggered actions fire once per press.
     pub fn is_trigger(self) -> bool {
-        matches!(self, Action::Camera | Action::Reset | Action::Pause)
+        matches!(self, Action::Camera | Action::Reset | Action::Pause | Action::ShiftUp | Action::ShiftDown)
     }
 }
 
@@ -202,6 +208,8 @@ impl Default for InputMap {
                 (Action::LookBack, b(&["key:KeyB", "pad:B"])),
                 (Action::Reset, b(&["key:KeyR", "pad:Select"])),
                 (Action::Pause, b(&["key:Escape", "key:KeyP", "pad:Start"])),
+                (Action::ShiftUp, b(&["key:KeyE", "pad:R3"])),
+                (Action::ShiftDown, b(&["key:KeyQ", "pad:L3"])),
             ],
         }
     }
@@ -332,6 +340,11 @@ impl InputState {
             v = v.max(x);
         }
         v
+    }
+
+    /// Fires an action as if its key had been pressed (testing aids).
+    pub fn push_trigger(&mut self, a: Action) {
+        self.triggered.push(a);
     }
 
     pub fn take_triggers(&mut self) -> Vec<Action> {

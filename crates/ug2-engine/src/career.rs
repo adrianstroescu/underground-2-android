@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::cars::tier;
-use crate::roads::RaceDef;
+use crate::roads::RaceInfo;
 use crate::vehicle::Perf;
 
 /// Performance upgrade categories, 3 levels each.
@@ -23,7 +23,7 @@ pub struct Career {
 }
 
 /// Stable key for a race: track number and direction.
-pub fn race_key(r: &RaceDef) -> String {
+pub fn race_key(r: &RaceInfo) -> String {
     format!("{}{}", r.track, if r.reverse { "R" } else { "F" })
 }
 
@@ -149,14 +149,14 @@ impl Career {
     }
 
     /// Career races in ladder order (cheapest prize first).
-    pub fn ladder(races: &[RaceDef]) -> Vec<usize> {
+    pub fn ladder(races: &[RaceInfo]) -> Vec<usize> {
         let mut order: Vec<usize> = (0..races.len()).collect();
         order.sort_by_key(|&i| (races[i].reward, races[i].track, races[i].reverse));
         order
     }
 
     /// A race is open once every race two or more steps earlier on the ladder is won.
-    pub fn unlocked(&self, races: &[RaceDef], ladder: &[usize], step: usize) -> bool {
+    pub fn unlocked(&self, races: &[RaceInfo], ladder: &[usize], step: usize) -> bool {
         ladder.iter().take(step.saturating_sub(2)).all(|&i| self.won.contains(&race_key(&races[i])))
     }
 

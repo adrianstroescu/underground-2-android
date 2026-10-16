@@ -22,6 +22,8 @@ pub struct GameConfig {
     pub hud_scale: f32,
     pub hud_opacity: f32,
     pub show_fps: bool,
+    /// Testing aid: the computer drives the player's car in races (`autopilot = 1`).
+    pub autopilot: bool,
     pub msaa: u32,
     /// Fraction of native resolution to render at (S23 Ultra native is 3088x1440).
     pub render_scale: f32,
@@ -47,6 +49,7 @@ impl Default for GameConfig {
             hud_scale: 1.0,
             hud_opacity: 0.55,
             show_fps: true,
+            autopilot: false,
             msaa: 4,
             render_scale: 1.0,
             draw_distance: 650.0,
@@ -108,6 +111,7 @@ impl GameConfig {
                 "hud_scale" => self.hud_scale = f().unwrap_or(self.hud_scale).clamp(0.5, 2.0),
                 "hud_opacity" => self.hud_opacity = f().unwrap_or(self.hud_opacity).clamp(0.1, 1.0),
                 "show_fps" => self.show_fps = v == "1" || v.eq_ignore_ascii_case("true"),
+                "autopilot" => self.autopilot = v == "1" || v.eq_ignore_ascii_case("true"),
                 "msaa" => self.msaa = if v.trim() == "1" { 1 } else { 4 },
                 "render_scale" => self.render_scale = f().unwrap_or(self.render_scale).clamp(0.3, 1.0),
                 "draw_distance" => self.draw_distance = f().unwrap_or(self.draw_distance).clamp(100.0, 3000.0),
@@ -169,7 +173,7 @@ impl GameConfig {
              vertex_light_scale = {}\n\
              traffic = {}\n\
              reflections = {}   # road reflections 0..1, 0 = off\n\
-             bloom = {}\n{}",
+             bloom = {}\n{}{}",
             self.car,
             self.location,
             self.paint[0],
@@ -186,6 +190,7 @@ impl GameConfig {
             self.traffic as u8,
             self.reflections,
             self.bloom as u8,
+            if self.autopilot { "autopilot = 1\n" } else { "" },
             parts,
         )
     }

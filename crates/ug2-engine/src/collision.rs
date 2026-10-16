@@ -13,6 +13,8 @@ pub struct Tri {
     pub wall: bool,
     /// Index into [`CollisionWorld::owners`] (debugging which object blocks the car).
     pub owner: u32,
+    /// Scenery group set the triangle belongs to (0 = always there).
+    pub group: u16,
 }
 
 pub struct CollisionWorld {
@@ -20,6 +22,9 @@ pub struct CollisionWorld {
     cells: HashMap<(i32, i32), Vec<u32>>,
     pub tris: Vec<Tri>,
     pub owners: Vec<String>,
+    group: u16,
+    /// Which group sets are switched on (race barriers); index 0 is unused.
+    groups_on: Vec<bool>,
 }
 
 impl Default for CollisionWorld {
@@ -33,7 +38,7 @@ const WALL_NZ: f32 = 0.6;
 
 impl CollisionWorld {
     pub fn new(cell: f32) -> Self {
-        Self { cell, cells: HashMap::new(), tris: Vec::new(), owners: Vec::new() }
+        Self { cell, cells: HashMap::new(), tris: Vec::new(), owners: Vec::new(), group: 0, groups_on: Vec::new() }
     }
 
     fn key(&self, x: f32, y: f32) -> (i32, i32) {
@@ -43,8 +48,18 @@ impl CollisionWorld {
     /// `ground_ok` false keeps only the wall part (used for buildings, whose roofs
     /// should not catch a car that clips into them).
     /// Names the object whose triangles are added next.
-    pub fn begin_owner(&mut self, name: &str) {
+    pub fn begin_owner(&mut self, name: &str, group: u16) {
         self.owners.push(name.to_string());
+        self.group = group;
+    }
+
+    /// Switches scenery group sets on or off (`on[set]`); sets past the end are off.
+    pub fn set_groups_on(&mut self, on: Vec<bool>) {
+        self.groups_on = on;
+    }
+
+    fn active(&self, t: &Tri) -> bool {
+        t.group == 0 || self.groups_on.get(t.group as usize).copied().unwrap_or(false)
     }
 
     pub fn add(&mut self, a: Vec3, b: Vec3, c: Vec3, ground_ok: bool) {
@@ -63,7 +78,7 @@ impl CollisionWorld {
         }
         let idx = self.tris.len() as u32;
         let owner = self.owners.len().saturating_sub(1) as u32;
-        self.tris.push(Tri { a, b, c, n, wall, owner });
+        self.tris.push(Tri { a, b, c, n, wall, owner, group: self.group });
         let min = a.min(b).min(c);
         let max = a.max(b).max(c);
         let (k0, k1) = (self.key(min.x, min.y), self.key(max.x, max.y));
@@ -87,7 +102,7 @@ impl CollisionWorld {
         let mut best: Option<(f32, Vec3)> = None;
         for &i in self.cell_tris(p.x, p.y) {
             let t = &self.tris[i as usize];
-            if t.wall {
+            if t.wall || !self.active(t) {
                 continue;
             }
             let Some(z) = height_on(t, Vec2::new(p.x, p.y)) else { continue };
@@ -111,7 +126,7 @@ impl CollisionWorld {
                 }
                 seen.push(i);
                 let t = &self.tris[i as usize];
-                if !t.wall || t.a.z.max(t.b.z).max(t.c.z) < min_top {
+                if !t.wall || t.a.z.max(t.b.z).max(t.c.z) < min_top || !self.active(t) {
                     continue;
                 }
                 let q = closest_point(p, t.a, t.b, t.c);

@@ -1,15 +1,16 @@
 //! Menus and screen flow: title, quick race setup, pause and race results.
 
-use ug2_formats::route::RaceType;
-
 use crate::career::{ai_perf, race_key, Career, UPGRADES};
 use crate::cars::{car_name, tier};
 
 use crate::cars::display_name;
+use crate::drift::{format_points, rival_scores};
+use crate::race::DriftEvent;
 use crate::config::SteerMode;
 use crate::hud::ordinal;
 use crate::menu::{MenuHit, MenuItem};
 use crate::race::format_time;
+use crate::roads::{Mode, RaceInfo};
 use crate::{Game, PAINTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +26,8 @@ pub enum Screen {
 
 /// Quick race choices, kept between races.
 pub struct QuickRace {
+    pub mode: Mode,
+    /// Index among the races of `mode`.
     pub race: usize,
     /// Selected step on the career ladder, and car on offer in the garage.
     pub career_step: usize,
@@ -37,14 +40,14 @@ pub struct QuickRace {
 
 impl Default for QuickRace {
     fn default() -> Self {
-        Self { race: 0, career_step: 0, shop_car: 0, laps: 2, opponents: 3, last: None }
+        Self { mode: Mode::Circuit, race: 0, career_step: 0, shop_car: 0, laps: 2, opponents: 3, last: None }
     }
 }
 
 /// A race waiting for its cars to load.
 #[derive(Clone, Debug)]
 pub struct PendingRace {
-    pub race: usize,
+    pub race: RaceInfo,
     pub laps: u32,
     pub opponents: Vec<(String, [f32; 3])>,
     /// Career race: (race key, prize, progress 0..1 for opponent strength).
@@ -77,6 +80,7 @@ enum Row {
     BackToCareer,
     FreeRoam,
     QuickRace,
+    RaceMode,
     Car,
     Color,
     Steering,
@@ -97,7 +101,8 @@ enum Row {
 
 impl Game {
     pub(crate) fn menu_visible(&self) -> bool {
-        self.spawned && (self.screen != Screen::Playing || self.paused)
+        // Hidden while another region loads (the loading screen covers everything).
+        self.spawned && !self.switching && (self.screen != Screen::Playing || self.paused)
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -126,11 +131,15 @@ impl Game {
                 v
             }
             Screen::QuickRace => {
-                let mut v = vec![Row::Track];
-                if self.selected_race().is_some_and(|r| r.kind == RaceType::Circuit) {
+                let mut v = vec![Row::RaceMode, Row::Track];
+                if self.quick.mode.laps() {
                     v.push(Row::Laps);
                 }
-                v.extend([Row::Opponents, Row::Car, Row::StartRace, Row::Back]);
+                // Drift rivals are scores, not cars on the track.
+                if self.quick.mode != Mode::Drift {
+                    v.push(Row::Opponents);
+                }
+                v.extend([Row::Car, Row::StartRace, Row::Back]);
                 v
             }
             Screen::Playing => {
@@ -144,7 +153,7 @@ impl Game {
                 v
             }
             Screen::Results => {
-                let n = self.session.race().map_or(0, |r| r.cars.len());
+                let n = self.session.race().map_or(0, |r| r.entrants());
                 let mut v: Vec<Row> = (0..n).map(Row::Standing).collect();
                 v.extend([Row::RaceAgain, Row::Continue]);
                 v
@@ -152,8 +161,13 @@ impl Game {
         }
     }
 
-    fn selected_race(&self) -> Option<&crate::roads::RaceDef> {
-        self.roads.as_ref().and_then(|r| r.races.get(self.quick.race))
+    fn selected_race(&self) -> Option<&RaceInfo> {
+        self.catalog.iter().filter(|r| r.mode == self.quick.mode).nth(self.quick.race)
+    }
+
+    /// Race modes with at least one race installed.
+    fn modes(&self) -> Vec<Mode> {
+        Mode::ALL.into_iter().filter(|m| self.catalog.iter().any(|r| r.mode == *m)).collect()
     }
 
     fn car_label(&self) -> String {
@@ -186,20 +200,20 @@ impl Game {
             SteerMode::Joystick => "JOYSTICK",
         };
         let on_off = |b: bool| if b { "ON" } else { "OFF" };
-        let ladder = self.roads.as_ref().map(|r| Career::ladder(&r.races)).unwrap_or_default();
+        let ladder = Career::ladder(&self.catalog);
         let shop = self.shop_cars();
         let items = rows
             .iter()
             .map(|row| match *row {
-                Row::Career => MenuItem::button(if self.roads.is_some() { "CAREER" } else { "CAREER (LOADING)" }),
+                Row::Career => MenuItem::button(if self.catalog.is_empty() { "CAREER (LOADING)" } else { "CAREER" }),
                 Row::CareerRace => {
-                    let text = match (self.roads.as_ref(), self.career.as_ref(), ladder.get(self.quick.career_step)) {
-                        (Some(roads), Some(c), Some(&i)) => {
-                            let r = &roads.races[i];
-                            let kind = if r.kind == RaceType::Circuit { "CIRCUIT" } else { "SPRINT" };
+                    let text = match (self.career.as_ref(), ladder.get(self.quick.career_step)) {
+                        (Some(c), Some(&i)) => {
+                            let r = &self.catalog[i];
+                            let kind = r.mode.label();
                             let state = if c.won.contains(&race_key(r)) {
                                 "WON"
-                            } else if c.unlocked(&roads.races, &ladder, self.quick.career_step) {
+                            } else if c.unlocked(&self.catalog, &ladder, self.quick.career_step) {
                                 "OPEN"
                             } else {
                                 "LOCKED"
@@ -284,17 +298,17 @@ impl Game {
                 Row::Msaa => MenuItem::choice("ANTI-ALIASING", if self.cfg.msaa > 1 { "4X (RESTART)" } else { "OFF (RESTART)" }),
                 Row::ShowFps => MenuItem::choice("SHOW FPS", on_off(self.cfg.show_fps)),
                 Row::QuickRace => {
-                    MenuItem::button(if self.roads.is_some() { "QUICK RACE" } else { "QUICK RACE (LOADING)" })
+                    MenuItem::button(if self.catalog.is_empty() { "QUICK RACE (LOADING)" } else { "QUICK RACE" })
                 }
+                Row::RaceMode => MenuItem::choice("MODE", self.quick.mode.label()),
                 Row::Car => MenuItem::choice("CAR", self.car_label()),
                 Row::Color => MenuItem::choice("COLOR", paint),
                 Row::Steering => MenuItem::choice("STEERING", steer),
                 Row::Traffic => MenuItem::choice("TRAFFIC", on_off(self.session.traffic_on)),
                 Row::Track => {
                     let name = self.selected_race().map_or("NO RACES".to_string(), |r| {
-                        let kind = if r.kind == RaceType::Circuit { "CIRCUIT" } else { "SPRINT" };
                         let rev = if r.reverse { " REV" } else { "" };
-                        format!("{kind}: {}{rev}", r.name)
+                        format!("{}{rev}", r.name)
                     });
                     MenuItem::choice("TRACK", name)
                 }
@@ -308,13 +322,23 @@ impl Game {
                 Row::QuitToMenu => MenuItem::button("QUIT TO MENU"),
                 Row::Standing(i) => {
                     let text = self.session.race().map_or(String::new(), |r| {
+                        if r.drift.is_some() {
+                            let rows = r.drift_standings();
+                            return rows.get(i).map_or(String::new(), |(name, score, _)| {
+                                format!("{}  {name}  {}", i + 1, format_points(*score))
+                            });
+                        }
                         let car = r.standings()[i];
                         let name = if car == 0 {
                             "YOU".to_string()
                         } else {
                             display_name(&self.session.opponents[car - 1].model).to_string()
                         };
-                        let time = r.cars[car].finish_time.map_or("--:--.--".to_string(), format_time);
+                        let time = match r.cars[car].finish_time {
+                            Some(t) => format_time(t),
+                            None if r.cars[car].retired => "DNF".to_string(),
+                            None => "--:--.--".to_string(),
+                        };
                         format!("{}  {name}  {time}", i + 1)
                     });
                     MenuItem::button(text)
@@ -335,7 +359,7 @@ impl Game {
             Screen::Garage => ("GARAGE".to_string(), self.car_label()),
             Screen::QuickRace => {
                 let sub = self.selected_race().map_or(String::new(), |r| {
-                    format!("{:.1} KM  |  REWARD ${}", r.line.length / 1000.0, r.reward)
+                    format!("{}  |  {:.1} KM  |  REWARD ${}", r.mode.label(), r.length as f32 / 1000.0, r.reward)
                 });
                 ("QUICK RACE".to_string(), sub)
             }
@@ -343,9 +367,13 @@ impl Game {
             Screen::Results => {
                 let place = self.session.race().map_or(1, |r| r.place(0));
                 let best = self.session.race().and_then(|r| r.cars[0].best_lap).map(format_time);
-                let mut sub = match best {
-                    Some(b) => format!("YOU FINISHED {}  |  BEST LAP {b}", ordinal(place)),
-                    None => format!("YOU FINISHED {}", ordinal(place)),
+                let score = self.session.race().and_then(|r| r.drift.as_ref()).map(|d| format_points(d.score.total));
+                let retired = self.session.race().is_some_and(|r| r.cars[0].retired);
+                let mut sub = match (score, best) {
+                    _ if retired => "ENGINE BLOWN  |  DID NOT FINISH".to_string(),
+                    (Some(s), _) => format!("YOU FINISHED {}  |  SCORE {s}", ordinal(place)),
+                    (None, Some(b)) => format!("YOU FINISHED {}  |  BEST LAP {b}", ordinal(place)),
+                    (None, None) => format!("YOU FINISHED {}", ordinal(place)),
                 };
                 if let Some(p) = self.prize_paid {
                     sub.push_str(&format!("  |  +${p}"));
@@ -390,7 +418,7 @@ impl Game {
                 self.cfg.show_fps = !self.cfg.show_fps;
                 self.cfg.save(&self.config_path);
             }
-            Row::Career if self.roads.is_some() => {
+            Row::Career if !self.catalog.is_empty() => {
                 self.in_career = true;
                 let starter = self.player_car.clone().unwrap_or_else(|| "PEUGOT".into());
                 if self.career.is_none() {
@@ -402,7 +430,7 @@ impl Game {
                 self.menu.selected = 0;
             }
             Row::CareerRace => {
-                let n = self.roads.as_ref().map_or(0, |r| r.races.len());
+                let n = self.catalog.len();
                 self.quick.career_step = cycle(self.quick.career_step, n);
             }
             Row::StartCareerRace => self.prepare_career_race(),
@@ -468,12 +496,25 @@ impl Game {
                 }
             }
             Row::FreeRoam => {
-                self.session.free_roam();
-                self.screen = Screen::Playing;
-                self.set_paused(false);
-                self.camera.snap(&self.vehicle);
+                // Free roam is in Bayview: come back from a race area first.
+                if self.region != self.cfg.location {
+                    self.pending_free_roam = true;
+                    let home = self.cfg.location.clone();
+                    self.load_region(&home);
+                } else {
+                    self.start_free_roam();
+                }
             }
-            Row::QuickRace if self.roads.is_some() => {
+            Row::RaceMode => {
+                let modes = self.modes();
+                let at = modes.iter().position(|m| *m == self.quick.mode).unwrap_or(0);
+                if let Some(&m) = modes.get(cycle(at, modes.len())) {
+                    self.quick.mode = m;
+                    self.quick.race = 0;
+                    self.quick.laps = self.selected_race().map_or(2, |r| r.laps.max(1));
+                }
+            }
+            Row::QuickRace if !self.catalog.is_empty() => {
                 self.screen = Screen::QuickRace;
                 self.menu.selected = 0;
             }
@@ -505,7 +546,7 @@ impl Game {
                 self.cfg.save(&self.config_path);
             }
             Row::Track => {
-                let n = self.roads.as_ref().map_or(0, |r| r.races.len());
+                let n = self.catalog.iter().filter(|r| r.mode == self.quick.mode).count();
                 self.quick.race = cycle(self.quick.race, n);
                 if let Some(r) = self.selected_race() {
                     self.quick.laps = r.laps.max(1);
@@ -585,15 +626,14 @@ impl Game {
 
     /// Starts the selected career race if it is unlocked.
     fn prepare_career_race(&mut self) {
-        let Some(roads) = &self.roads else { return };
         let Some(career) = &self.career else { return };
-        let ladder = Career::ladder(&roads.races);
+        let ladder = Career::ladder(&self.catalog);
         let step = self.quick.career_step.min(ladder.len().saturating_sub(1));
         let Some(&race) = ladder.get(step) else { return };
-        if !career.unlocked(&roads.races, &ladder, step) {
+        if !career.unlocked(&self.catalog, &ladder, step) {
             return;
         }
-        let def = &roads.races[race];
+        let def = self.catalog[race].clone();
         let (class, progress) = Career::opponent_strength(step, ladder.len());
         let player = self.current_car();
         let mut pool: Vec<String> = self.racers.iter().filter(|r| **r != player && tier(r) == class).cloned().collect();
@@ -613,10 +653,10 @@ impl Game {
             opponents.push((car, PAINTS[seed as usize % PAINTS.len()].1));
         }
         let p = PendingRace {
-            race,
             laps: def.laps,
             opponents,
-            career: Some((race_key(def), def.reward, progress)),
+            career: Some((race_key(&def), def.reward, progress)),
+            race: def,
         };
         self.quick.last = Some(p.clone());
         self.pending_race = Some(p);
@@ -624,9 +664,7 @@ impl Game {
 
     /// Picks opponents and starts loading their cars; the race begins once they are in.
     fn prepare_race(&mut self) {
-        if self.selected_race().is_none() {
-            return;
-        }
+        let Some(race) = self.selected_race().cloned() else { return };
         let player = self.current_car();
         let mut pool: Vec<String> = self.racers.iter().filter(|r| **r != player).cloned().collect();
         let mut seed = (self.title_time * 1000.0) as u32 | 1;
@@ -637,7 +675,8 @@ impl Game {
             seed
         };
         let mut opponents = Vec::new();
-        for _ in 0..self.quick.opponents {
+        let count = if race.mode == Mode::Drift { 3 } else { self.quick.opponents };
+        for _ in 0..count {
             if pool.is_empty() {
                 break;
             }
@@ -645,26 +684,47 @@ impl Game {
             let paint = PAINTS[rand() as usize % PAINTS.len()].1;
             opponents.push((car, paint));
         }
-        let p = PendingRace { race: self.quick.race, laps: self.quick.laps, opponents, career: None };
+        let p = PendingRace { race, laps: self.quick.laps, opponents, career: None };
         self.quick.last = Some(p.clone());
         self.pending_race = Some(p);
     }
 
     pub(crate) fn try_start_pending_race(&mut self) {
         let Some(p) = &self.pending_race else { return };
-        let missing: Vec<String> = p.opponents.iter().map(|o| o.0.clone()).filter(|n| !self.models.contains_key(n)).collect();
+        // The race's region comes first (the call waits for a load in progress).
+        if self.region != p.race.region {
+            let region = p.race.region.clone();
+            self.load_region(&region);
+            return;
+        }
+        if self.world_loading || self.roads.is_none() {
+            return;
+        }
+        // Drift rivals only lend their names: nothing to load.
+        let missing: Vec<String> = p
+            .opponents
+            .iter()
+            .map(|o| o.0.clone())
+            .filter(|n| p.race.mode != Mode::Drift && !self.models.contains_key(n))
+            .collect();
         if !missing.is_empty() {
             for m in &missing {
                 self.request_model(m);
             }
             return;
         }
+        let drift = p.race.mode == Mode::Drift;
         let p = self.pending_race.take().unwrap();
-        let Some(def) = self.roads.as_ref().and_then(|r| r.races.get(p.race)).cloned() else { return };
+        let Some(def) = self.roads.as_ref().and_then(|r| r.race(&p.race)).cloned() else {
+            log::warn!("race {} ({}) is not in the loaded region", p.race.track, p.race.name);
+            return;
+        };
         let strength = p.career.as_ref().map(|c| c.2);
         let opps: Vec<(String, [f32; 3], crate::play::ModelPhysics, crate::vehicle::Perf)> = p
             .opponents
             .iter()
+            .filter(|_| !drift)
+            .take(if def.info.mode == Mode::Drag { 3 } else { 5 })
             .filter_map(|(n, c)| {
                 let base = self.base_perf(n);
                 let perf = match strength {
@@ -680,8 +740,16 @@ impl Game {
         if !car.is_empty() {
             self.vehicle.perf = self.perf_for(&car);
         }
-        log::info!("race {} ({}): {} laps, {} opponents", def.track, def.name, p.laps, opps.len());
+        log::info!("race {} ({} {:?}): {} laps, {} opponents", def.info.track, def.info.name, def.info.mode, p.laps, opps.len());
+        let length = def.line.length;
         self.session.start_race(def, p.laps, &mut self.vehicle, &opps);
+        if drift {
+            let scores = rival_scores(length, p.laps, strength.unwrap_or(0.4));
+            let rivals = p.opponents.iter().zip(scores).map(|((n, _), s)| (display_name(n).to_string(), s)).collect();
+            if let Some(r) = self.session.race_mut() {
+                r.drift = Some(DriftEvent { score: Default::default(), rivals });
+            }
+        }
         self.camera.snap(&self.vehicle);
         self.screen = Screen::Playing;
         self.finish_timer = 0.0;

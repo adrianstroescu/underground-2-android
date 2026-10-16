@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use ug2_formats::carinfo::CarUsage;
 use ug2_formats::fs::GameDir;
-use ug2_formats::scenery::ScenerySection;
+use ug2_formats::scenery::{SceneryGroups, SceneryInstance, ScenerySection, GROUP_CONTROLLED};
 use ug2_formats::solid::Solid;
 use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 use ug2_formats::track::{parse_region, parse_streaming_sections};
@@ -18,7 +18,7 @@ use crate::cars::{load_car, CarModel, SharedCarData};
 use crate::sound::{Effects, EngineSound};
 use crate::collision::CollisionWorld;
 use ug2_formats::parts::PartLibrary;
-use crate::roads::RoadData;
+use crate::roads::{installed_races, RaceInfo, RoadData};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
@@ -81,8 +81,13 @@ pub struct MeshData {
 pub struct SectionAsset {
     pub number: u32,
     pub sky: bool,
+    /// Scenery group set (0 = always shown), see [`LoadEvent::Groups`].
+    pub group: u16,
     pub mesh: MeshData,
 }
+
+/// Group set of each group-controlled instance, by (section number, instance index).
+type GroupSets = HashMap<(u32, u16), u16>;
 
 pub struct PreparedTexture {
     pub hash: u32,
@@ -96,7 +101,15 @@ pub struct PreparedTexture {
 
 pub enum LoadEvent {
     Progress(String),
+    /// Car and part textures.
     Textures(Vec<PreparedTexture>),
+    /// Textures of the region being loaded (dropped when another region loads).
+    WorldTextures(Vec<PreparedTexture>),
+    /// Every race of the installed regions.
+    Catalog(Vec<RaceInfo>),
+    /// Scenery group sets of the loaded region: for set `n` (from 1), the names of the
+    /// groups that show it (e.g. "BARRIERS_4301"). Set 0 is always shown.
+    Groups(Vec<Vec<String>>),
     /// Rim styles for the garage, in catalogue order (index + 1 = `PartSet::rim`).
     Rims(Vec<String>),
     /// Car lists from CarTypeInfo.
@@ -130,6 +143,9 @@ pub enum LoadRequest {
     Car { name: String, parts: ug2_formats::car::PartSet },
     /// Engine sound of `car` at upgrade `level` (the stock one comes with the car).
     Engine { car: String, level: usize },
+    /// Replace the world with region `0` (e.g. "L4RC"); answered like the first load,
+    /// from `Progress` to `Done`.
+    World(String),
 }
 
 /// Background loader: loads the player's car and the world, then serves car requests.
@@ -154,11 +170,12 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             let racers = shared.names(CarUsage::Racer);
             let traffic = shared.names(CarUsage::Traffic);
             let _ = tx.send(LoadEvent::CarList { racers, traffic, perfs: shared.perfs() });
+            let _ = tx.send(LoadEvent::Catalog(installed_races(&game)));
             // The part catalogue costs a moment to build: only up front if the saved car uses it.
             let mut lib = None;
             send_car(&game, &shared, &mut lib, &cfg, &cfg.car, &cfg.parts, &tx);
             let _ = tx.send(LoadEvent::Effects(Box::new(Effects::load(&game))));
-            if let Err(e) = load_world(&game, &cfg, &tx) {
+            if let Err(e) = load_world(&game, &cfg.location, cfg.bc_textures, &tx) {
                 log::error!("load failed: {e:#}");
                 let _ = tx.send(LoadEvent::Failed(format!("{e:#}")));
                 return;
@@ -171,6 +188,12 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             for req in req_rx {
                 match req {
                     LoadRequest::Car { name, parts } => send_car(&game, &shared, &mut lib, &cfg, &name, &parts, &tx),
+                    LoadRequest::World(region) => {
+                        if let Err(e) = load_world(&game, &region, cfg.bc_textures, &tx) {
+                            log::error!("load {region} failed: {e:#}");
+                            let _ = tx.send(LoadEvent::Failed(format!("{e:#}")));
+                        }
+                    }
                     LoadRequest::Engine { car, level } => {
                         if let Some(sound) = EngineSound::load(&game, &car, level) {
                             let _ = tx.send(LoadEvent::Engine { car: format!("{car}#{level}"), sound: Box::new(sound) });
@@ -215,16 +238,32 @@ fn send_car(
     }
 }
 
-fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
+fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let send = |e: LoadEvent| {
         let _ = tx.send(e);
     };
 
     send(LoadEvent::Progress("READING TRACK".into()));
-    let index = game.read(&format!("TRACKS/{}.BUN", cfg.location))?;
-    let stream = game.read(&format!("TRACKS/STREAM{}.BUN", cfg.location))?;
+    let index = game.read(&format!("TRACKS/{region}.BUN"))?;
+    let stream = game.read(&format!("TRACKS/STREAM{region}.BUN"))?;
     let sections = parse_streaming_sections(&index)?;
+    // Instances shown only by scenery groups (race barriers, shop markers) are kept
+    // apart, one set per combination of groups, so the game can switch them.
+    let groups = SceneryGroups::parse(&index);
+    let mut set_names: Vec<Vec<String>> = vec![Vec::new()];
+    let mut set_of_combo: HashMap<Vec<u16>, u16> = HashMap::new();
+    let mut sets: GroupSets = HashMap::new();
+    for (key, mut combo) in groups.membership() {
+        combo.sort_unstable();
+        let id = *set_of_combo.entry(combo.clone()).or_insert_with(|| {
+            set_names.push(combo.iter().map(|&g| groups.groups[g as usize].0.clone()).collect());
+            (set_names.len() - 1) as u16
+        });
+        sets.insert(key, id);
+    }
+    log::info!("{region}: {} scenery groups in {} sets", groups.groups.len(), set_names.len() - 1);
+    send(LoadEvent::Groups(set_names));
 
     send(LoadEvent::Progress("PARSING TRACK".into()));
     let mut solids: HashMap<u32, Arc<Solid>> = HashMap::new();
@@ -269,7 +308,7 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
     }
 
     send(LoadEvent::Progress("BUILDING COLLISION".into()));
-    let (collision, spawn) = build_collision(&scenery, &solids);
+    let (collision, spawn) = build_collision(&scenery, &solids, &sets);
     send(LoadEvent::Collision(collision));
     log::info!("{} world lights", lights.len());
     send(LoadEvent::Lights(lights));
@@ -284,9 +323,9 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
         let prepared: Vec<PreparedTexture> = chunk
             .iter()
             .filter(|t| seen.insert(t.hash))
-            .filter_map(|t| prepare_texture(t, cfg.bc_textures))
+            .filter_map(|t| prepare_texture(t, bc_textures))
             .collect();
-        send(LoadEvent::Textures(prepared));
+        send(LoadEvent::WorldTextures(prepared));
     }
     drop(textures);
 
@@ -302,14 +341,19 @@ fn load_world(game: &GameDir, cfg: &LoaderConfig, tx: &Sender<LoadEvent>) -> any
         }
         let sc = &scenery[i];
         let sky = sc.number / 100 == 26;
-        let mesh = if sky { build_sky_mesh(sc, &solids, &blend_of) } else { build_section_mesh(sc, &solids, &blend_of) };
-        if mesh.indices.is_empty() {
-            continue;
+        let meshes = if sky {
+            vec![(0, build_sky_mesh(sc, &solids, &blend_of))]
+        } else {
+            build_section_meshes(sc, &solids, &blend_of, &sets)
+        };
+        for (group, mesh) in meshes {
+            if !mesh.indices.is_empty() {
+                send(LoadEvent::Section(SectionAsset { number: sc.number, sky, group, mesh }));
+            }
         }
-        send(LoadEvent::Section(SectionAsset { number: sc.number, sky, mesh }));
     }
-    log::info!("world loaded in {:.2?}", t0.elapsed());
-    match RoadData::load(game, &cfg.location) {
+    log::info!("world {region} loaded in {:.2?}", t0.elapsed());
+    match RoadData::load(game, region) {
         Ok(r) => send(LoadEvent::Roads(Box::new(r))),
         Err(e) => log::warn!("no road data: {e:#}"),
     }
@@ -340,9 +384,8 @@ fn instance_solid<'a>(
     solids: &'a HashMap<u32, Arc<Solid>>,
 ) -> Option<&'a Arc<Solid>> {
     let info = sc.infos.get(inst.info as usize)?;
-    // 0x200: race-route barriers, 0x4/0x8: start/finish graphics (forward/backward).
-    // The game only shows these during events.
-    if inst.flags & (0x200 | 0x4 | 0x8) != 0 || info.name.starts_with("ZPM_") {
+    // 0x4/0x8: start/finish graphics (forward/backward), only shown during events.
+    if inst.flags & (0x4 | 0x8) != 0 || info.name.starts_with("ZPM_") {
         return None;
     }
     if info.name.starts_with("PAN_") {
@@ -411,15 +454,42 @@ pub fn finish_mesh(vertices: Vec<GpuVertex>, buckets: Buckets, bbox: (Vec3, Vec3
     MeshData { vertices, indices, ranges, bbox_min: bbox.0, bbox_max: bbox.1 }
 }
 
+/// Group set that shows instance `i` of `sc`: 0 = always, None = never (under group
+/// control but listed by no group, e.g. animated props).
+fn instance_set(sc: &ScenerySection, i: usize, inst: &SceneryInstance, sets: &GroupSets) -> Option<u16> {
+    if inst.flags & GROUP_CONTROLLED == 0 {
+        return Some(0);
+    }
+    sets.get(&(sc.number, i as u16)).copied()
+}
+
+/// One mesh per group set present in the section (set 0: the always-shown scenery).
+fn build_section_meshes(
+    sc: &ScenerySection,
+    solids: &HashMap<u32, Arc<Solid>>,
+    blend_of: &HashMap<u32, Blend>,
+    sets: &GroupSets,
+) -> Vec<(u16, MeshData)> {
+    let mut by_set: Vec<u16> = sc.instances.iter().enumerate().filter_map(|(i, inst)| instance_set(sc, i, inst, sets)).collect();
+    by_set.sort_unstable();
+    by_set.dedup();
+    by_set.into_iter().map(|set| (set, build_section_mesh(sc, solids, blend_of, sets, set))).collect()
+}
+
 fn build_section_mesh(
     sc: &ScenerySection,
     solids: &HashMap<u32, Arc<Solid>>,
     blend_of: &HashMap<u32, Blend>,
+    sets: &GroupSets,
+    set: u16,
 ) -> MeshData {
     let mut vertices = Vec::new();
     let mut buckets = HashMap::new();
     let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    for inst in &sc.instances {
+    for (i, inst) in sc.instances.iter().enumerate() {
+        if instance_set(sc, i, inst, sets) != Some(set) {
+            continue;
+        }
         let Some(solid) = instance_solid(sc, inst, solids) else { continue };
         // Street surfaces get the reflective road role (opaque groups only).
         let road = sc.infos.get(inst.info as usize).is_some_and(|i| i.name.contains("ROAD"));
@@ -455,6 +525,7 @@ fn build_sky_mesh(sc: &ScenerySection, solids: &HashMap<u32, Arc<Solid>>, blend_
 fn build_collision(
     scenery: &[ScenerySection],
     solids: &HashMap<u32, Arc<Solid>>,
+    sets: &GroupSets,
 ) -> (CollisionWorld, Option<(Vec3, f32)>) {
     let mut world = CollisionWorld::new(8.0);
     // Spawn on an open-air road piece near the middle of the map.
@@ -464,23 +535,26 @@ fn build_collision(
         if sc.number / 100 == 26 {
             continue;
         }
-        for inst in &sc.instances {
+        for (i, inst) in sc.instances.iter().enumerate() {
+            let Some(set) = instance_set(sc, i, inst, sets) else { continue };
             let Some(solid) = instance_solid(sc, inst, solids) else { continue };
             let name = &sc.infos[inst.info as usize].name;
             let terrain = name.starts_with("TRN");
-            let wall_only = name.starts_with("XB") || name.starts_with("XW");
+            // Race barriers switched on by a scenery group block cars whatever their prefix
+            // (Bayview's are XO_ props).
+            let wall_only = name.starts_with("XB") || name.starts_with("XW") || (set != 0 && name.contains("Barrier"));
             if !terrain && !wall_only {
                 continue;
             }
             let Some(mesh) = &solid.mesh else { continue };
             let m = Mat4::from_cols_array(&inst.matrix());
             let pts: Vec<Vec3> = mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))).collect();
-            world.begin_owner(&solid.name);
+            world.begin_owner(&solid.name, set);
             for t in mesh.indices.chunks_exact(3) {
                 world.add(pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize], terrain);
             }
             let is_road = name.contains("ROAD") || solid.name.contains("ROAD");
-            if terrain && is_road && !pts.is_empty() {
+            if terrain && is_road && set == 0 && !pts.is_empty() {
                 let min = pts.iter().fold(Vec3::splat(f32::MAX), |a, &p| a.min(p));
                 let max = pts.iter().fold(Vec3::splat(f32::MIN), |a, &p| a.max(p));
                 let center = (min + max) * 0.5;

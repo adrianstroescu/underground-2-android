@@ -8,6 +8,7 @@ pub mod career;
 pub mod cars;
 pub mod collision;
 pub mod config;
+pub mod drift;
 pub mod font;
 mod frontend;
 pub mod hud;
@@ -24,7 +25,7 @@ pub mod vehicle;
 
 pub use ug2_audio::{music, sound};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::TryRecvError;
 use std::sync::Arc;
@@ -49,9 +50,9 @@ use crate::music::Music;
 use crate::play::{wheel_transforms, ModelPhysics, Session};
 use crate::race::RacePhase;
 use crate::render::{CarDraw, FrameData, Gpu, Renderer};
-use crate::roads::RoadData;
+use crate::roads::{Mode as RaceMode, RaceInfo, RoadData};
 use crate::sound::{EngineSound, Sound, SoundState};
-use crate::vehicle::Vehicle;
+use crate::vehicle::{Shift, Vehicle};
 
 pub use wgpu;
 
@@ -143,6 +144,29 @@ pub struct Game {
     status: Status,
     world: Option<CollisionWorld>,
     roads: Option<RoadData>,
+    /// Every race of the installed regions.
+    catalog: Vec<RaceInfo>,
+    /// World region loaded (or loading), e.g. "L4RA".
+    region: String,
+    /// Another region is loading: the loading screen covers the old world.
+    switching: bool,
+    /// Go to free roam once Bayview is back.
+    pending_free_roam: bool,
+    /// Textures of the loaded region, and of cars (kept when the region changes).
+    world_textures: HashSet<u32>,
+    car_textures: HashSet<u32>,
+    /// Scenery group sets of the loaded region (see [`LoadEvent::Groups`]) and the race
+    /// track whose barriers are switched on (0: free roam).
+    group_sets: Vec<Vec<String>>,
+    groups_for: Option<u16>,
+    /// Big centred race message (shift timing, blown engine): text, colour, time left.
+    banner: Option<(String, [f32; 4], f32)>,
+    /// Steering input last frame (drag lane changes fire on a new press).
+    lane_input: f32,
+    /// Driver for the player's car when the `autopilot` test option is on.
+    autopilot: Option<crate::ai::AiDriver>,
+    /// Seconds the autopilot has been stuck (it is put back on the line after 3).
+    autopilot_stuck: f32,
     lights: Vec<ug2_formats::light::WorldLight>,
     vehicle: Vehicle,
     models: HashMap<String, ModelInfo>,
@@ -237,6 +261,18 @@ impl Game {
             status,
             world: None,
             roads: None,
+            catalog: Vec::new(),
+            region: cfg.location.clone(),
+            switching: false,
+            pending_free_roam: false,
+            world_textures: HashSet::new(),
+            car_textures: HashSet::new(),
+            group_sets: Vec::new(),
+            groups_for: None,
+            banner: None,
+            lane_input: 0.0,
+            autopilot: None,
+            autopilot_stuck: 0.0,
             lights: Vec::new(),
             vehicle: Vehicle::new(Vec3::ZERO, 0.0, 0.16, 2.6),
             models: HashMap::new(),
@@ -386,6 +422,35 @@ impl Game {
         self.apply_engine_sound();
     }
 
+    /// Replaces the world with `region` (another race area). Waits for a load in
+    /// progress to finish first: call again until [`Game::region`] matches.
+    pub(crate) fn load_region(&mut self, region: &str) {
+        if self.region == region || self.world_loading {
+            return;
+        }
+        let Some(loader) = &self.loader else { return };
+        log::info!("loading region {region}");
+        loader.request(LoadRequest::World(region.to_string()));
+        self.region = region.to_string();
+        self.session.free_roam();
+        self.session.traffic.cars.clear();
+        let drop: Vec<u32> = self.world_textures.drain().filter(|h| !self.car_textures.contains(h)).collect();
+        self.renderer.clear_world(&drop);
+        self.world = None;
+        self.roads = None;
+        self.lights.clear();
+        self.world_loading = true;
+        self.switching = true;
+        self.status = Status::Loading("LOADING".into());
+    }
+
+    pub(crate) fn start_free_roam(&mut self) {
+        self.session.free_roam();
+        self.screen = Screen::Playing;
+        self.set_paused(false);
+        self.camera.snap(&self.vehicle);
+    }
+
     /// Stock performance of `car`.
     fn base_perf(&self, car: &str) -> vehicle::Perf {
         self.base_perfs.get(car).copied().unwrap_or_else(|| cars::base_perf(car))
@@ -455,14 +520,29 @@ impl Game {
             };
             match ev {
                 LoadEvent::Progress(s) => {
-                    if !matches!(self.status, Status::Ready) {
+                    if !matches!(self.status, Status::Ready) || self.switching {
                         self.status = Status::Loading(s);
                     }
                 }
                 LoadEvent::Textures(ts) => {
                     for t in &ts {
                         self.renderer.upload_texture(&self.gpu, t);
+                        self.car_textures.insert(t.hash);
                     }
+                }
+                LoadEvent::WorldTextures(ts) => {
+                    for t in &ts {
+                        self.renderer.upload_texture(&self.gpu, t);
+                        self.world_textures.insert(t.hash);
+                    }
+                }
+                LoadEvent::Groups(g) => {
+                    self.group_sets = g;
+                    self.groups_for = None;
+                }
+                LoadEvent::Catalog(c) => {
+                    log::info!("{} races in the installed regions", c.len());
+                    self.catalog = c;
                 }
                 LoadEvent::CarList { racers, traffic, perfs } => {
                     log::info!("{} racers, {} traffic cars, {} with performance data", racers.len(), traffic.len(), perfs.len());
@@ -501,15 +581,20 @@ impl Game {
                 }
                 LoadEvent::Roads(r) => self.roads = Some(*r),
                 LoadEvent::Rims(r) => self.rim_names = r,
-                LoadEvent::Collision(c) => self.world = Some(c),
+                LoadEvent::Collision(c) => {
+                    self.world = Some(c);
+                    self.groups_for = None;
+                }
                 LoadEvent::Lights(l) => self.lights = l,
                 LoadEvent::Spawn { pos, yaw } => {
                     self.vehicle.reset(pos, yaw);
                     self.camera.snap(&self.vehicle);
                     self.spawned = true;
-                    self.status = Status::Ready;
+                    if !self.switching {
+                        self.status = Status::Ready;
+                    }
                 }
-                LoadEvent::Section(s) => self.renderer.add_section(&self.gpu, &s.mesh, s.sky),
+                LoadEvent::Section(s) => self.renderer.add_section(&self.gpu, &s.mesh, s.sky, s.group),
                 LoadEvent::Done => {
                     log::info!(
                         "loaded: {} sections, {} textures",
@@ -518,10 +603,12 @@ impl Game {
                     );
                     self.status = Status::Ready;
                     self.world_loading = false;
+                    self.switching = false;
                 }
                 LoadEvent::Failed(e) => {
                     self.status = Status::Failed(e);
                     self.world_loading = false;
+                    self.switching = false;
                 }
             }
         }
@@ -539,6 +626,10 @@ impl Game {
         }
         self.pump_loader(Duration::from_millis(12));
         self.try_start_pending_race();
+        if self.pending_free_roam && !self.world_loading && self.region == self.cfg.location {
+            self.pending_free_roam = false;
+            self.start_free_roam();
+        }
 
         let mut triggers = self.input.take_triggers();
         triggers.extend(self.hud.take_triggers());
@@ -547,7 +638,33 @@ impl Game {
                 Action::Camera => self.camera.next_mode(),
                 Action::Reset => self.reset_player(),
                 Action::Pause => self.back_pressed(),
+                Action::ShiftUp if self.screen == Screen::Playing => {
+                    if let Some(q) = self.vehicle.shift(true) {
+                        let col = match q {
+                            Shift::Perfect => [0.2, 1.0, 0.35, 1.0],
+                            Shift::Good => [1.0, 1.0, 1.0, 1.0],
+                            Shift::Early | Shift::Late => [1.0, 0.55, 0.2, 1.0],
+                        };
+                        self.banner = Some((q.label().to_string(), col, 1.2));
+                    }
+                }
+                Action::ShiftDown => {
+                    self.vehicle.shift(false);
+                }
                 _ => {}
+            }
+        }
+
+        self.update_groups();
+        // Event handling: drift events loosen the grip, drags have a manual gearbox.
+        let race_mode = self.session.race().map(|r| r.def.info.mode);
+        self.vehicle.drift_handling = race_mode == Some(RaceMode::Drift);
+        self.vehicle.manual = race_mode == Some(RaceMode::Drag);
+        self.hud.set_drag(self.vehicle.manual);
+        if let Some((_, _, t)) = &mut self.banner {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.banner = None;
             }
         }
 
@@ -556,10 +673,24 @@ impl Game {
         let countdown = matches!(self.session.race().map(|r| r.phase), Some(RacePhase::Countdown(_)));
         let finished = matches!(self.session.race().map(|r| r.phase), Some(RacePhase::Finished));
         if countdown {
-            // Rev on the line, but stay put.
-            controls = Controls { throttle: controls.throttle, brake: 1.0, ..Controls::default() };
+            // Rev on the line, but stay put (held below: the brake pedal would reverse).
+            controls = Controls { throttle: controls.throttle, ..Controls::default() };
         } else if finished {
             controls = Controls { brake: 0.4, ..Controls::default() };
+        } else if playing && race_mode == Some(RaceMode::Drag) {
+            if self.cfg.autopilot {
+                controls = Controls { throttle: 1.0, ..Controls::default() };
+                if self.vehicle.rpm >= 0.9 {
+                    self.input.push_trigger(Action::ShiftUp);
+                }
+            }
+            controls.steer = self.drag_steer(controls.steer);
+            controls.handbrake = false;
+            controls.brake = 0.0;
+        } else if playing && race_mode.is_some() && self.cfg.autopilot {
+            if let Some(c) = self.autopilot_controls(dt) {
+                controls = c;
+            }
         }
         let simulate = self.spawned && !self.paused && self.screen != Screen::Title;
         if simulate {
@@ -580,7 +711,15 @@ impl Game {
             if steps == 12 {
                 self.acc = 0.0;
             }
+            if countdown {
+                self.vehicle.vel.x = 0.0;
+                self.vehicle.vel.y = 0.0;
+                self.vehicle.yaw_rate = 0.0;
+            }
             self.session.animate(&self.physics, dt);
+        }
+        if simulate {
+            self.score_event(dt);
         }
         if self.spawned {
             let radius = self.player_model().map_or(0.33, |m| m.physics.wheel_radius);
@@ -608,8 +747,12 @@ impl Game {
                     .race()
                     .map(|r| format!(" | race {:?} t {:.1} place {}/{} lap {}", r.phase, r.time, r.place(0), r.cars.len(), r.player_lap()))
                     .unwrap_or_default();
+                let wall = match (&self.world, v.wall_hits) {
+                    (Some(w), n) if n > 0 => format!(" | wall {}", w.owners.get(v.last_wall as usize).map_or("?", |s| s.as_str())),
+                    _ => String::new(),
+                };
                 log::info!(
-                    "car pos {:.1?} speed {:.1} | thr {:.1} brk {:.1} steer {:.2} | traffic {} | audio {peak:.2}{race}",
+                    "car pos {:.1?} speed {:.1} | thr {:.1} brk {:.1} steer {:.2} | traffic {} | audio {peak:.2}{race}{wall}",
                     v.pos,
                     v.speed() * 3.6,
                     controls.throttle,
@@ -682,6 +825,95 @@ impl Game {
         self.player_car.as_ref().and_then(|n| self.models.get(n))
     }
 
+    /// Drag races: hold the lane; a new press left or right moves one lane over.
+    fn drag_steer(&mut self, input: f32) -> f32 {
+        const LANE: f32 = 3.6;
+        let pressed = input.abs() > 0.5 && self.lane_input.abs() <= 0.5;
+        self.lane_input = input;
+        let mut lane = self.session.player_lane;
+        let Some(r) = self.session.race() else { return input };
+        let line = &r.def.line;
+        let n = line.points.len();
+        let i = r.cars[0].index.min(n - 1);
+        if pressed {
+            // Steering right moves to the lane on the right (offsets grow to the left).
+            lane -= input.signum() * LANE;
+        }
+        let room = (line.half_width[i] - 1.5).max(0.0);
+        lane = lane.clamp(-room, room);
+        let a = line.points[i];
+        let b = line.points[(i + 4).min(n - 1)];
+        let d = (b - a).truncate().normalize_or_zero();
+        if d == glam::Vec2::ZERO {
+            return 0.0;
+        }
+        let left = glam::Vec2::new(-d.y, d.x);
+        let lat = (self.vehicle.pos - a).truncate().dot(left);
+        // Aim 12 m ahead at the lane centre.
+        let desired = d.y.atan2(d.x) + ((lane - lat) / 12.0).atan();
+        let mut e = desired - self.vehicle.yaw;
+        e = (e + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        self.session.player_lane = lane;
+        (-e * 2.5).clamp(-1.0, 1.0)
+    }
+
+    /// Switches on the scenery groups of the race in progress (its barriers), or the
+    /// free roam ones (shop markers), when that changes.
+    fn update_groups(&mut self) {
+        let track = self.session.race().map_or(0, |r| r.def.info.track);
+        if self.groups_for == Some(track) {
+            return;
+        }
+        let wanted: Vec<String> = if track == 0 {
+            vec!["FREE_ROAM".into()]
+        } else {
+            vec![format!("BARRIERS_{track}"), format!("PLAYER_BARRIERS_{track}")]
+        };
+        let on: Vec<bool> = self.group_sets.iter().map(|names| names.iter().any(|n| wanted.contains(n))).collect();
+        log::info!("scenery groups {wanted:?}: {} sets on", on.iter().filter(|&&b| b).count());
+        self.renderer.set_groups_on(on.clone());
+        if let Some(w) = &mut self.world {
+            w.set_groups_on(on);
+        }
+        self.groups_for = Some(track);
+    }
+
+    /// The computer's controls for the player's car (testing aid).
+    fn autopilot_controls(&mut self, dt: f32) -> Option<Controls> {
+        let r = self.session.race()?;
+        let path = crate::play::line_path(&r.def.line, r.cars[0].index, 0.0, 70);
+        let ai = self.autopilot.get_or_insert_with(|| crate::ai::AiDriver::new(1.0, 80.0));
+        ai.top_speed = self.vehicle.perf.top_speed;
+        // Drift grip is low: take the corners slower.
+        ai.pace = if self.vehicle.drift_handling { 0.55 } else { 1.0 };
+        let c = ai.drive(&self.vehicle, &path, dt);
+        self.autopilot_stuck = if self.vehicle.speed().abs() < 1.0 { self.autopilot_stuck + dt } else { 0.0 };
+        if self.autopilot_stuck > 3.0 {
+            self.autopilot_stuck = 0.0;
+            self.reset_player();
+        }
+        Some(c)
+    }
+
+    /// Drift points and blown engines, once per frame during a race.
+    fn score_event(&mut self, dt: f32) {
+        let angle = self.vehicle.drift_angle();
+        let speed = self.vehicle.vel.truncate().length();
+        let impact = self.vehicle.impact;
+        let blown = self.vehicle.blown;
+        let Some(r) = self.session.race_mut() else { return };
+        if r.phase != RacePhase::Running {
+            return;
+        }
+        if let Some(d) = &mut r.drift {
+            d.score.update(angle, speed, impact, dt);
+        }
+        if blown && !r.cars[0].retired {
+            r.retire(0);
+            self.banner = Some(("ENGINE BLOWN".into(), [1.0, 0.25, 0.2, 1.0], 3.0));
+        }
+    }
+
     fn race_hud(&self) -> Option<RaceHud> {
         let r = self.session.race()?;
         let p = &r.cars[0];
@@ -689,6 +921,41 @@ impl Game {
             RacePhase::Countdown(t) => Some(t),
             _ => None,
         };
+        let banner = self.banner.clone();
+        if let Some(d) = &r.drift {
+            let standings = r
+                .drift_standings()
+                .into_iter()
+                .map(|(name, score, player)| StandingRow {
+                    name,
+                    gap: 0.0,
+                    player,
+                    finished: false,
+                    value: Some(crate::drift::format_points(score)),
+                })
+                .collect();
+            return Some(RaceHud {
+                standings,
+                place: r.place(0),
+                cars: r.entrants(),
+                lap: r.player_lap(),
+                laps: r.laps,
+                circuit: true,
+                remaining: 0.0,
+                time: r.time,
+                countdown,
+                go_flash: if countdown.is_none() { 1.0 - r.time } else { 0.0 },
+                wrong_way: p.wrong_way > 1.0,
+                final_lap: r.laps > 1 && p.lap + 1 == r.laps as i32 && p.lap_start + 3.0 > r.time,
+                drift: Some(crate::hud::DriftHud {
+                    total: d.score.total,
+                    pending: d.score.pending(),
+                    multiplier: d.score.multiplier,
+                    flash: d.score.flash.clone(),
+                }),
+                banner,
+            });
+        }
         let speed = self.vehicle.speed().abs().max(10.0);
         let standings = r
             .standings()
@@ -705,6 +972,7 @@ impl Game {
                     gap: (p.total - prog.total) / speed,
                     player: car == 0,
                     finished: prog.finish_time.is_some(),
+                    value: prog.retired.then(|| "DNF".to_string()),
                 }
             })
             .collect();
@@ -721,6 +989,8 @@ impl Game {
             go_flash: if countdown.is_none() { 1.0 - r.time } else { 0.0 },
             wrong_way: p.wrong_way > 1.0,
             final_lap: r.def.line.circuit && r.laps > 1 && p.lap + 1 == r.laps as i32 && p.lap_start + 3.0 > r.time,
+            drift: None,
+            banner,
         })
     }
 
@@ -739,7 +1009,7 @@ impl Game {
                 self.hud.message(&mut self.canvas, &["LOADING FAILED", &short]);
                 return;
             }
-            Status::Loading(s) if !self.spawned => {
+            Status::Loading(s) if !self.spawned || self.switching => {
                 let s = s.clone();
                 self.hud.message(&mut self.canvas, &["NEED FOR SPEED UNDERGROUND 2", &s]);
                 return;
@@ -754,6 +1024,8 @@ impl Game {
                 nitro: self.vehicle.nitro,
                 fps: self.fps,
                 draw_calls: self.renderer.stats_draws,
+                manual: self.vehicle.manual,
+                heat: self.vehicle.heat,
             };
             self.hud.draw(&mut self.canvas, &t, show_touch, self.cfg.show_fps);
             if let Some(r) = self.race_hud() {

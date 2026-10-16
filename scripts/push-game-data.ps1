@@ -1,7 +1,9 @@
 # Copies the original game files from your PC install to the phone over adb.
 #   powershell -ExecutionPolicy Bypass -File scripts\push-game-data.ps1 -GameDir "D:\Games\NFSU2" [-Full]
-# Default copies what the current build uses (~1.4 GB: all cars, GLOBAL, Bayview, routes,
-# sound and music); -Full also copies FRONTEND, LANGUAGES and every track region.
+# Default copies what the current build uses (~1.6 GB: all cars, GLOBAL, Bayview and the
+# drag, drift, Street X and URL tracks with their routes, sound and music); -Full also
+# copies FRONTEND, LANGUAGES and the unused regions. Files already on the phone are
+# skipped (--sync), so running it again after an update only sends what is new.
 # Set ANDROID_SERIAL when more than one device or emulator is attached.
 param(
     [string]$GameDir = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
@@ -40,7 +42,11 @@ foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata") { Push $d }
 if ($Full) {
     foreach ($d in "TRACKS", "FRONTEND", "LANGUAGES") { Push $d }
 } else {
-    foreach ($f in "L4RA.BUN", "STREAML4RA.BUN", "LOC4DYNTEX.BIN", "ROUTESL4RA") { Push "TRACKS\$f" }
+    Push "TRACKS\LOC4DYNTEX.BIN"
+    # Bayview, then the race-only regions: drags (B, D), drift (C), Street X (F), URL (G).
+    foreach ($r in "L4RA", "L4RB", "L4RC", "L4RD", "L4RF", "L4RG") {
+        foreach ($f in "$r.BUN", "STREAM$r.BUN", "ROUTES$r") { Push "TRACKS\$f" }
+    }
     Get-ChildItem "$GameDir\TRACKS" -Filter "TRACKMAP4*.BIN" | ForEach-Object { Push "TRACKS\$($_.Name)" }
 }
 # Folders created by adb belong to the shell user (mode 2770); open them up so the

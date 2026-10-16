@@ -10,7 +10,7 @@ use crate::ai::AiDriver;
 use crate::collision::CollisionWorld;
 use crate::input::Controls;
 use crate::race::{Race, RacePhase};
-use crate::roads::{RaceDef, RoadData};
+use crate::roads::{Mode as RaceMode, RaceDef, RaceLine, RoadData};
 use crate::traffic::Traffic;
 use crate::vehicle::{Perf, Vehicle};
 
@@ -45,6 +45,10 @@ pub struct Session {
     pub opponents: Vec<Opponent>,
     pub traffic: Traffic,
     pub traffic_on: bool,
+    /// Drag races: the player's lane, metres left of the race line.
+    pub player_lane: f32,
+    /// Street races have traffic; drags, drifts and the closed tracks do not.
+    traffic_allowed: bool,
     traffic_controls: Vec<Controls>,
     rng: u32,
 }
@@ -56,6 +60,8 @@ impl Session {
             opponents: Vec::new(),
             traffic: Traffic::new(traffic_density),
             traffic_on: true,
+            player_lane: 0.0,
+            traffic_allowed: true,
             traffic_controls: Vec::new(),
             rng: 0x9E37_79B9,
         }
@@ -79,6 +85,7 @@ impl Session {
     pub fn free_roam(&mut self) {
         self.mode = Mode::FreeRoam;
         self.opponents.clear();
+        self.traffic_allowed = true;
     }
 
     /// Puts the player and opponents on the grid and starts the countdown.
@@ -103,10 +110,21 @@ impl Session {
                 t.y.atan2(t.x)
             }
         };
+        // Sideways offset of a grid slot from the race line (drag lanes).
+        let lane_of = |p: Vec3| {
+            let i = def.line.locate(p, None);
+            let m = def.line.points.len();
+            let d = (def.line.points[(i + 1) % m] - def.line.points[i]).truncate().normalize_or_zero();
+            (p - def.line.points[i]).truncate().dot(glam::Vec2::new(-d.y, d.x))
+        };
+        let drag = def.info.mode == RaceMode::Drag;
+        self.traffic_allowed = matches!(def.info.mode, RaceMode::Circuit | RaceMode::Sprint);
         // Player starts at the back of the grid, as in the original.
         let player_slot = n - 1;
         let p = slots[player_slot];
         player.reset(p + Vec3::Z * (player.ride_height + 0.3), face(p));
+        player.reset_engine();
+        self.player_lane = lane_of(p);
         self.opponents.clear();
         for (i, (model, paint, phys, perf)) in opponents.iter().enumerate() {
             let p = slots[i];
@@ -114,7 +132,7 @@ impl Session {
             v.reset(p + Vec3::Z * (phys.ride_height + 0.3), face(p));
             v.perf = *perf;
             let pace = 0.92 + 0.06 * (self.rand() % 100) as f32 / 100.0;
-            let lane = ((i as f32 % 3.0) - 1.0) * 2.2;
+            let lane = if drag { lane_of(p) } else { ((i as f32 % 3.0) - 1.0) * 2.2 };
             self.opponents.push(Opponent {
                 vehicle: v,
                 model: model.clone(),
@@ -156,7 +174,6 @@ impl Session {
             positions.extend(self.opponents.iter().map(|o| o.vehicle.pos));
             race.update(&positions, dt);
             let line = &race.def.line;
-            let n = line.points.len();
             let player_total = race.cars[0].total;
             for (k, o) in self.opponents.iter_mut().enumerate() {
                 let prog = &race.cars[k + 1];
@@ -164,18 +181,7 @@ impl Session {
                     o.controls = Controls { brake: if countdown { 0.0 } else { 1.0 }, ..Controls::default() };
                     continue;
                 }
-                let mut path = Vec::with_capacity(70);
-                for j in 0..70 {
-                    let i = prog.index + j;
-                    if !line.circuit && i >= n {
-                        break;
-                    }
-                    let (a, b) = (line.points[i % n], line.points[(i + 1) % n]);
-                    let d = (b - a).truncate().normalize_or_zero();
-                    let left = Vec3::new(-d.y, d.x, 0.0);
-                    let lane = o.lane.clamp(-(line.half_width[i % n] - 1.5).max(0.0), (line.half_width[i % n] - 1.5).max(0.0));
-                    path.push(a + left * lane);
-                }
+                let path = line_path(line, prog.index, o.lane, 70);
                 // Rubber band: a little faster when behind the player, slower far ahead.
                 let gap = (player_total - prog.total) / 300.0;
                 o.driver.pace = o.base_pace * (1.0 + gap.clamp(-0.12, 0.12));
@@ -191,9 +197,10 @@ impl Session {
         }
 
         // Traffic follows its lanes and keeps its distance from whatever is ahead.
-        if let (Some(roads), true) = (roads, self.traffic_on) {
+        let traffic = self.traffic_on && self.traffic_allowed;
+        if let (Some(roads), true) = (roads, traffic) {
             self.traffic.maintain(&roads.graph, player.pos, traffic_models);
-        } else if !self.traffic_on {
+        } else if !traffic {
             self.traffic.cars.clear();
         }
         let others: Vec<(Vec3, Vec3)> = std::iter::once((player.pos, player.vel))
@@ -265,6 +272,25 @@ impl Session {
             t.brake_light += (on - t.brake_light) * k;
         }
     }
+}
+
+/// `count` points of the race line from point `from` on, `lane` metres to the left
+/// (kept inside the road): the path an AI driver follows.
+pub fn line_path(line: &RaceLine, from: usize, lane: f32, count: usize) -> Vec<Vec3> {
+    let n = line.points.len();
+    let mut path = Vec::with_capacity(count);
+    for j in 0..count {
+        let i = from + j;
+        if !line.circuit && i >= n {
+            break;
+        }
+        let (a, b) = (line.points[i % n], line.points[(i + 1) % n]);
+        let d = (b - a).truncate().normalize_or_zero();
+        let left = Vec3::new(-d.y, d.x, 0.0);
+        let room = (line.half_width[i % n] - 1.5).max(0.0);
+        path.push(a + left * lane.clamp(-room, room));
+    }
+    path
 }
 
 /// Two circles per car (front and rear axle area); overlapping cars are pushed apart and

@@ -1,8 +1,10 @@
 //! A race in progress: countdown, lap counting and standings from each car's distance
-//! along the race line, wrong-way detection and the finish.
+//! along the race line, wrong-way detection and the finish. Drift events rank the
+//! player's score against rival scores instead.
 
 use glam::Vec3;
-use ug2_formats::route::RaceType;
+
+use crate::drift::DriftScore;
 
 use crate::roads::RaceDef;
 
@@ -30,6 +32,16 @@ pub struct Progress {
     pub wrong_way: f32,
     pub lap_start: f32,
     pub best_lap: Option<f32>,
+    /// Out of the race (blown engine).
+    pub retired: bool,
+}
+
+/// The scoring side of a drift event.
+#[derive(Clone, Debug)]
+pub struct DriftEvent {
+    pub score: DriftScore,
+    /// Rival names and the scores they set.
+    pub rivals: Vec<(String, u32)>,
 }
 
 pub struct Race {
@@ -40,11 +52,12 @@ pub struct Race {
     pub time: f32,
     /// One entry per car: index 0 is the player, then the opponents.
     pub cars: Vec<Progress>,
+    pub drift: Option<DriftEvent>,
 }
 
 impl Race {
     pub fn new(def: RaceDef, laps: u32, starts: &[Vec3]) -> Self {
-        let laps = if def.kind == RaceType::Circuit { laps.max(1) } else { 1 };
+        let laps = if def.info.mode.laps() { laps.max(1) } else { 1 };
         let cars = starts
             .iter()
             .map(|&p| {
@@ -61,10 +74,11 @@ impl Race {
                     wrong_way: 0.0,
                     lap_start: 0.0,
                     best_lap: None,
+                    retired: false,
                 }
             })
             .collect();
-        Self { def, laps, phase: RacePhase::Countdown(3.5), time: 0.0, cars }
+        Self { def, laps, phase: RacePhase::Countdown(3.5), time: 0.0, cars, drift: None }
     }
 
     pub fn racing(&self) -> bool {
@@ -90,7 +104,7 @@ impl Race {
         let line = &self.def.line;
         let full = self.distance();
         for (p, &pos) in self.cars.iter_mut().zip(positions) {
-            if p.finish_time.is_some() {
+            if p.finish_time.is_some() || p.retired {
                 continue;
             }
             p.index = line.locate(pos, Some(p.index));
@@ -122,9 +136,29 @@ impl Race {
                 p.total = full;
             }
         }
-        if self.phase == RacePhase::Running && self.cars[0].finish_time.is_some() {
+        if self.phase == RacePhase::Running && (self.cars[0].finish_time.is_some() || self.cars[0].retired) {
             self.phase = RacePhase::Finished;
+            if let Some(d) = &mut self.drift {
+                d.score.finish();
+            }
         }
+    }
+
+    /// Takes car `i` out of the race.
+    pub fn retire(&mut self, i: usize) {
+        if let Some(p) = self.cars.get_mut(i) {
+            p.retired = true;
+        }
+    }
+
+    /// Drift events: (name, score, is the player) best first. Rivals' scores stand
+    /// from the start; the player's counts what is banked.
+    pub fn drift_standings(&self) -> Vec<(String, u32, bool)> {
+        let Some(d) = &self.drift else { return Vec::new() };
+        let mut rows: Vec<(String, u32, bool)> = d.rivals.iter().map(|(n, s)| (n.clone(), *s, false)).collect();
+        rows.push(("YOU".into(), d.score.total, true));
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then(b.2.cmp(&a.2)));
+        rows
     }
 
     /// Car indices from first to last.
@@ -132,6 +166,9 @@ impl Race {
         let mut order: Vec<usize> = (0..self.cars.len()).collect();
         order.sort_by(|&a, &b| {
             let (pa, pb) = (&self.cars[a], &self.cars[b]);
+            if pa.retired != pb.retired {
+                return pa.retired.cmp(&pb.retired);
+            }
             match (pa.finish_time, pb.finish_time) {
                 (Some(x), Some(y)) => x.total_cmp(&y),
                 (Some(_), None) => std::cmp::Ordering::Less,
@@ -142,9 +179,17 @@ impl Race {
         order
     }
 
-    /// 1-based place of car `i`.
+    /// 1-based place of car `i` (drift events: the player among the rivals).
     pub fn place(&self, i: usize) -> usize {
+        if self.drift.is_some() && i == 0 {
+            return self.drift_standings().iter().position(|r| r.2).map_or(1, |p| p + 1);
+        }
         self.standings().iter().position(|&c| c == i).map_or(self.cars.len(), |p| p + 1)
+    }
+
+    /// Entrants, rivals of a drift event included.
+    pub fn entrants(&self) -> usize {
+        self.drift.as_ref().map_or(self.cars.len(), |d| d.rivals.len() + 1)
     }
 
     /// Lap the player is on, 1-based, for the HUD.

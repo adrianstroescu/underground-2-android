@@ -187,6 +187,8 @@ pub enum Button {
     Camera,
     Reset,
     Pause,
+    ShiftUp,
+    ShiftDown,
 }
 
 impl Button {
@@ -202,6 +204,8 @@ impl Button {
             Button::Camera => "CAM",
             Button::Reset => "RESET",
             Button::Pause => "II",
+            Button::ShiftUp => "+",
+            Button::ShiftDown => "-",
         }
     }
 
@@ -219,6 +223,8 @@ impl Button {
             Button::Camera => Some(Action::Camera),
             Button::Reset => Some(Action::Reset),
             Button::Pause => Some(Action::Pause),
+            Button::ShiftUp => Some(Action::ShiftUp),
+            Button::ShiftDown => Some(Action::ShiftDown),
             _ => None,
         }
     }
@@ -297,6 +303,18 @@ pub struct StandingRow {
     pub gap: f32,
     pub player: bool,
     pub finished: bool,
+    /// Shown instead of the gap (drift scores, "DNF").
+    pub value: Option<String>,
+}
+
+/// Drift event scoring for the HUD.
+#[derive(Clone, Debug, Default)]
+pub struct DriftHud {
+    pub total: u32,
+    /// The slide in progress, multiplier included.
+    pub pending: u32,
+    pub multiplier: u32,
+    pub flash: Option<(String, f32)>,
 }
 
 pub fn ordinal(n: usize) -> String {
@@ -325,6 +343,9 @@ pub struct RaceHud {
     pub go_flash: f32,
     pub wrong_way: bool,
     pub final_lap: bool,
+    pub drift: Option<DriftHud>,
+    /// Big centred message (shift timing, blown engine), its colour and time left.
+    pub banner: Option<(String, Rgba, f32)>,
 }
 
 /// Snapshot of what the driver is doing, for drawing the speedometer.
@@ -336,6 +357,9 @@ pub struct Telemetry {
     pub nitro: f32,
     pub fps: f32,
     pub draw_calls: u32,
+    /// Manual gearbox (drag): the gauge shows the shift light and engine heat.
+    pub manual: bool,
+    pub heat: f32,
 }
 
 pub struct Hud {
@@ -351,6 +375,8 @@ pub struct Hud {
     triggers: Vec<Action>,
     /// True once any touch happened; desktop players never see the touch overlay.
     pub touch_seen: bool,
+    /// Drag race layout: shift buttons instead of brake and handbrake.
+    drag: bool,
 }
 
 const ACCENT: Rgba = [0.25, 0.85, 1.0, 1.0];
@@ -370,6 +396,15 @@ impl Hud {
             joy_radius: 70.0,
             triggers: Vec::new(),
             touch_seen: false,
+            drag: false,
+        }
+    }
+
+    /// Switches to the drag race controls (or back).
+    pub fn set_drag(&mut self, drag: bool) {
+        if self.drag != drag {
+            self.drag = drag;
+            self.layout(self.size.x, self.size.y, self.dp);
         }
     }
 
@@ -384,14 +419,20 @@ impl Hud {
         // above the steering buttons; camera, look-back and reset bottom centre.
         let mut b = vec![
             ButtonDef::pedal(Button::Gas, vec2(w - 74.0 * s, h - 98.0 * s), vec2(40.0, 70.0) * s),
-            ButtonDef::pedal(Button::Brake, vec2(w - 176.0 * s, h - 74.0 * s), vec2(36.0, 46.0) * s),
             ButtonDef::circle(Button::Nitro, vec2(w - 190.0 * s, h - 194.0 * s), 30.0 * s),
-            ButtonDef::circle(Button::Handbrake, vec2(64.0 * s, h - 192.0 * s), 28.0 * s),
             ButtonDef::circle(Button::Pause, vec2(36.0 * s, 36.0 * s), 22.0 * s),
             ButtonDef::circle(Button::Camera, vec2(w * 0.5 - 64.0 * s, h - 30.0 * s), 22.0 * s),
             ButtonDef::circle(Button::LookBack, vec2(w * 0.5, h - 30.0 * s), 22.0 * s),
             ButtonDef::circle(Button::Reset, vec2(w * 0.5 + 64.0 * s, h - 30.0 * s), 22.0 * s),
         ];
+        if self.drag {
+            // Drag: shift up where the brake pedal sits, shift down beside it.
+            b.push(ButtonDef::circle(Button::ShiftUp, vec2(w - 182.0 * s, h - 82.0 * s), 40.0 * s));
+            b.push(ButtonDef::circle(Button::ShiftDown, vec2(w - 276.0 * s, h - 60.0 * s), 26.0 * s));
+        } else {
+            b.push(ButtonDef::pedal(Button::Brake, vec2(w - 176.0 * s, h - 74.0 * s), vec2(36.0, 46.0) * s));
+            b.push(ButtonDef::circle(Button::Handbrake, vec2(64.0 * s, h - 192.0 * s), 28.0 * s));
+        }
         if self.steer_mode == SteerMode::Buttons {
             // Side by side, bottom left; the touch zones (1.2 x radius) meet in the middle
             // so a thumb can rock between them.
@@ -546,6 +587,13 @@ impl Hud {
                     Button::SteerRight => c.chevrons(b.center, r * 0.62, vec2(1.0, 0.0), 2, 8.0 * s, icon),
                     Button::Gas => c.chevrons(b.center, r * 0.9, vec2(0.0, -1.0), 3, 7.0 * s, icon),
                     Button::Brake => c.pedal_icon(b.center, r * 1.25, icon),
+                    Button::ShiftUp | Button::ShiftDown => {
+                        let size = r * 0.09;
+                        c.text(b.center.x, b.center.y - font::HEIGHT * size * 0.62, size, 0.5, b.id.label(), icon);
+                        if b.id == Button::ShiftUp {
+                            c.text(b.center.x, b.center.y + r * 0.42, 1.2 * s, 0.5, "SHIFT", icon);
+                        }
+                    }
                     _ => {
                         let label = b.id.label();
                         let size = (r * 0.5 / (font::ADVANCE * label.len().max(3) as f32 * 0.5)).min(3.2 * s);
@@ -597,6 +645,23 @@ impl Hud {
             c.arc(center, r - 24.0 * s, 2.5 * s, a0, at(t.nitro), [0.2, 0.6, 1.0, 0.95]);
         }
         let rpm = t.rpm.clamp(0.0, 1.0);
+        if t.manual {
+            // Shift light: the perfect window on the dial, lit when the needle is in it.
+            let win = crate::vehicle::PERFECT_SHIFT;
+            let lit = win.contains(&rpm);
+            let green = [0.2, 1.0, 0.35, if lit { 1.0 } else { 0.45 }];
+            c.arc(center, r - 3.0 * s, 6.0 * s, at(win.start), at(win.end), green);
+            if lit {
+                c.text(center.x, center.y - r - 18.0 * s, 2.4 * s, 0.5, "SHIFT", green);
+            }
+            if t.heat > 0.02 {
+                // Engine heat bar under the dial.
+                let (bw, bh) = (r * 1.6, 5.0 * s);
+                let (bx, by) = (center.x - bw * 0.5, center.y + r + 6.0 * s);
+                c.rect(bx, by, bw, bh, [0.0, 0.0, 0.0, 0.5]);
+                c.rect(bx, by, bw * t.heat.min(1.0), bh, [1.0, 0.35 - 0.25 * t.heat, 0.1, 0.95]);
+            }
+        }
         let d = dir(at(rpm));
         c.line(center - d * 6.0 * s, center + d * (r - 8.0 * s), 3.0 * s, [1.0, 0.35, 0.15, 1.0]);
         c.circle(center, 4.0 * s, [1.0, 0.35, 0.15, 1.0]);
@@ -674,8 +739,30 @@ impl Hud {
             format!("LEFT {:.1} KM", (r.remaining / 1000.0).max(0.0))
         };
         c.text(x + 10.0 * s, y + 6.0 * s, 1.9 * s, 0.0, &first, ACCENT);
-        let time = format!("TIME {}", crate::race::format_time(r.time));
-        c.text(x + 10.0 * s, y + 25.0 * s, 1.9 * s, 0.0, &time, WHITE);
+        let second = match &r.drift {
+            Some(d) => format!("SCORE {}", crate::drift::format_points(d.total)),
+            None => format!("TIME {}", crate::race::format_time(r.time)),
+        };
+        c.text(x + 10.0 * s, y + 25.0 * s, 1.9 * s, 0.0, &second, WHITE);
+        if let Some(d) = &r.drift {
+            // The slide in progress, big at the top centre, and the last result under it.
+            if d.pending > 0 {
+                let text = crate::drift::format_points(d.pending);
+                c.text(w * 0.5, 54.0 * s, 4.2 * s, 0.5, &text, WHITE);
+                let mult = format!("DRIFT  X{}", d.multiplier);
+                c.text(w * 0.5, 96.0 * s, 2.0 * s, 0.5, &mult, ACCENT);
+            } else if d.multiplier > 1 {
+                let mult = format!("X{}", d.multiplier);
+                c.text(w * 0.5, 96.0 * s, 2.0 * s, 0.5, &mult, [ACCENT[0], ACCENT[1], ACCENT[2], 0.6]);
+            }
+            if let Some((text, t)) = &d.flash {
+                let col = if text == "CRASH" { [1.0, 0.25, 0.2, t.min(1.0)] } else { [1.0, 0.85, 0.2, t.min(1.0)] };
+                c.text(w * 0.5, 118.0 * s, 2.6 * s, 0.5, text, col);
+            }
+        }
+        if let Some((text, col, t)) = &r.banner {
+            c.text(w * 0.5, self.size.y * 0.24, 3.2 * s, 0.5, text, [col[0], col[1], col[2], t.min(1.0)]);
+        }
 
         // Place and standings, top right.
         let right = w - 12.0 * s;
@@ -691,9 +778,9 @@ impl Hud {
             let ry = 42.0 * s + i as f32 * row_h;
             let bg = if st.player { [0.1, 0.35, 0.9, 0.75] } else { [0.0, 0.0, 0.0, 0.45] };
             c.rect(right - list_w, ry, list_w, row_h - 2.0 * s, bg);
-            let name = format!("{} {}", i + 1, st.name);
-            c.text(right - list_w + 5.0 * s, ry + 2.0 * s, 1.3 * s, 0.0, &name, WHITE);
-            let gap = if st.player {
+            let gap = if let Some(v) = &st.value {
+                v.clone()
+            } else if st.player {
                 "---".to_string()
             } else if st.finished {
                 "FIN".to_string()
@@ -701,6 +788,13 @@ impl Hud {
                 format!("{:+.1}", st.gap)
             };
             c.text(right - 5.0 * s, ry + 2.0 * s, 1.3 * s, 1.0, &gap, [1.0, 1.0, 1.0, 0.85]);
+            // The name gets what the value leaves, cut short if needed.
+            let room = list_w - Canvas::text_width(&gap, 1.3 * s) - 14.0 * s;
+            let mut name = format!("{} {}", i + 1, st.name);
+            while name.len() > 3 && Canvas::text_width(&name, 1.3 * s) > room {
+                name.pop();
+            }
+            c.text(right - list_w + 5.0 * s, ry + 2.0 * s, 1.3 * s, 0.0, name.trim_end(), WHITE);
         }
         if let Some(t) = r.countdown {
             let text = if t > 3.0 { "" } else if t > 2.0 { "3" } else if t > 1.0 { "2" } else if t > 0.0 { "1" } else { "GO!" };

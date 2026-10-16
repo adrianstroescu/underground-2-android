@@ -158,6 +158,8 @@ struct GpuMesh {
     ranges: Vec<DrawRange>,
     bbox_min: Vec3,
     bbox_max: Vec3,
+    /// Scenery group set (0 = always drawn).
+    group: u16,
 }
 
 /// Everything the renderer needs to draw one frame.
@@ -214,6 +216,8 @@ pub struct Renderer {
     textures: HashMap<u32, wgpu::BindGroup>,
     white: wgpu::BindGroup,
     sections: Vec<GpuMesh>,
+    /// Which scenery group sets are drawn (race barriers); index 0 is unused.
+    groups_on: Vec<bool>,
     sky: Vec<GpuMesh>,
     car_models: Vec<CarGpu>,
     targets: Option<Targets>,
@@ -537,6 +541,7 @@ impl Renderer {
             textures: HashMap::new(),
             white,
             sections: Vec::new(),
+            groups_on: Vec::new(),
             sky: Vec::new(),
             car_models: Vec::new(),
             targets: None,
@@ -573,16 +578,35 @@ impl Renderer {
             contents: bytemuck::cast_slice(&m.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        Some(GpuMesh { vbuf, ibuf, ranges: m.ranges.clone(), bbox_min: m.bbox_min, bbox_max: m.bbox_max })
+        Some(GpuMesh { vbuf, ibuf, ranges: m.ranges.clone(), bbox_min: m.bbox_min, bbox_max: m.bbox_max, group: 0 })
     }
 
-    pub fn add_section(&mut self, gpu: &Gpu, mesh: &MeshData, sky: bool) {
-        if let Some(m) = Self::upload_mesh(gpu, mesh) {
+    pub fn add_section(&mut self, gpu: &Gpu, mesh: &MeshData, sky: bool, group: u16) {
+        if let Some(mut m) = Self::upload_mesh(gpu, mesh) {
+            m.group = group;
             if sky {
                 self.sky.push(m);
             } else {
                 self.sections.push(m);
             }
+        }
+    }
+
+    /// Switches scenery group sets on or off (`on[set]`); sets past the end are off.
+    pub fn set_groups_on(&mut self, on: Vec<bool>) {
+        self.groups_on = on;
+    }
+
+    fn section_on(&self, m: &GpuMesh) -> bool {
+        m.group == 0 || self.groups_on.get(m.group as usize).copied().unwrap_or(false)
+    }
+
+    /// Drops the world (sections, sky and the given textures) before another region loads.
+    pub fn clear_world(&mut self, textures: &[u32]) {
+        self.sections.clear();
+        self.sky.clear();
+        for h in textures {
+            self.textures.remove(h);
         }
     }
 
@@ -780,7 +804,8 @@ impl Renderer {
         let visible: Vec<usize> = (0..self.sections.len())
             .filter(|&i| {
                 let m = &self.sections[i];
-                aabb_distance(f.cam_pos, m.bbox_min, m.bbox_max) < f.draw_distance
+                self.section_on(m)
+                    && aabb_distance(f.cam_pos, m.bbox_min, m.bbox_max) < f.draw_distance
                     && aabb_in_frustum(&planes, m.bbox_min, m.bbox_max)
             })
             .collect();
@@ -829,7 +854,9 @@ impl Renderer {
             let near: Vec<usize> = (0..self.sections.len())
                 .filter(|&i| {
                     let m = &self.sections[i];
-                    aabb_distance(f.cam_pos, m.bbox_min, m.bbox_max) < range && aabb_in_frustum(&rplanes, m.bbox_min, m.bbox_max)
+                    self.section_on(m)
+                        && aabb_distance(f.cam_pos, m.bbox_min, m.bbox_max) < range
+                        && aabb_in_frustum(&rplanes, m.bbox_min, m.bbox_max)
                 })
                 .collect();
             for &i in &near {

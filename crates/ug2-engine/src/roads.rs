@@ -8,7 +8,7 @@ use glam::{Vec2, Vec3};
 use ug2_formats::fs::GameDir;
 use ug2_formats::route::{
     parse_career_races, parse_markers, parse_routes, parse_track_infos, race_line, CareerRace, MarkerKind, RaceType,
-    Route, RouteNetwork, TrackInfo, TrackMarker,
+    Route, RouteNetwork, TrackMarker,
 };
 
 /// One end of a route at a junction node.
@@ -108,15 +108,140 @@ impl RaceLine {
     }
 }
 
-/// A race that can be started in the loaded region.
-#[derive(Clone, Debug)]
-pub struct RaceDef {
+/// The original's race modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Mode {
+    Circuit,
+    Sprint,
+    Drag,
+    Drift,
+    StreetX,
+    /// Underground Racing League: circuits on closed tracks.
+    Url,
+}
+
+impl Mode {
+    pub const ALL: [Mode; 6] = [Mode::Circuit, Mode::Sprint, Mode::Drag, Mode::Drift, Mode::StreetX, Mode::Url];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Circuit => "CIRCUIT",
+            Mode::Sprint => "SPRINT",
+            Mode::Drag => "DRAG",
+            Mode::Drift => "DRIFT",
+            Mode::StreetX => "STREET X",
+            Mode::Url => "URL",
+        }
+    }
+
+    /// Raced over laps of a closed loop (sprints and drags go from A to B).
+    pub fn laps(self) -> bool {
+        !matches!(self, Mode::Sprint | Mode::Drag)
+    }
+}
+
+/// A race from the game's career list, in any region; its line is built once the
+/// region is loaded (see [`RaceDef`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RaceInfo {
     pub track: u16,
     pub name: String,
-    pub kind: RaceType,
+    pub mode: Mode,
+    /// World region it is held in, e.g. "L4RA" (Bayview) or "L4RC" (drift tracks).
+    pub region: String,
     pub reverse: bool,
     pub laps: u32,
     pub reward: u32,
+    /// Lap (circuit) or race (sprint) length in metres, from the track table.
+    pub length: u32,
+}
+
+/// Every race of the career list whose region `available` says is installed, one per
+/// track and direction.
+pub fn race_catalog(global_b: &[u8], available: impl Fn(&str) -> bool) -> Vec<RaceInfo> {
+    let tracks = parse_track_infos(global_b).unwrap_or_default();
+    let career = parse_career_races(global_b).unwrap_or_default();
+    // Regular career entries (group 1) and URL ones (3, 4) first; tutorial and
+    // special entries only fill gaps.
+    let mut ordered: Vec<&CareerRace> = career.iter().collect();
+    ordered.sort_by_key(|c| !matches!(c.group, 1 | 3 | 4));
+    let mut out: Vec<RaceInfo> = Vec::new();
+    for c in ordered {
+        if out.iter().any(|r| r.track == c.track && r.reverse == c.reverse) {
+            continue;
+        }
+        let Some(info) = tracks.iter().find(|t| t.number == c.track) else { continue };
+        let region = info.region.to_ascii_uppercase();
+        if !available(&region) {
+            continue;
+        }
+        let mode = match c.race_type {
+            // Bayview's drift entries are unfinished (the line has gaps of 200 m).
+            RaceType::Drift if region == "L4RA" => continue,
+            RaceType::Circuit if c.group >= 3 || region == "L4RG" => Mode::Url,
+            RaceType::Circuit => Mode::Circuit,
+            RaceType::Sprint => Mode::Sprint,
+            RaceType::Drag => Mode::Drag,
+            RaceType::Drift => Mode::Drift,
+            RaceType::StreetX => Mode::StreetX,
+            RaceType::Other(_) => continue,
+        };
+        // Some entries pack more than the lap count into the field.
+        let laps = match c.laps & 0xFF {
+            _ if !mode.laps() => 1,
+            l @ 1..=6 => l,
+            _ => 2,
+        };
+        out.push(RaceInfo {
+            track: c.track,
+            name: clean_name(&info.name),
+            mode,
+            region,
+            reverse: c.reverse,
+            laps,
+            reward: c.reward,
+            length: info.length,
+        });
+    }
+    out.sort_by_key(|r| (r.mode as u8, r.track, r.reverse));
+    out
+}
+
+/// True if the files of world region `r` are present.
+pub fn region_installed(game: &GameDir, r: &str) -> bool {
+    [format!("TRACKS/{r}.BUN"), format!("TRACKS/STREAM{r}.BUN"), format!("TRACKS/ROUTES{r}/TrackPosMarkersAll.bin")]
+        .iter()
+        .all(|p| game.resolve(p).is_some())
+}
+
+/// The races that can be started with the installed files: the region is there and the
+/// race has a grid and a start line in its direction.
+pub fn installed_races(game: &GameDir) -> Vec<RaceInfo> {
+    let Ok(global_b) = game.read("GLOBAL/GLOBALB.BUN").or_else(|_| game.read_unpacked("GLOBAL/GlobalB.lzc")) else {
+        return Vec::new();
+    };
+    let mut markers: HashMap<String, Vec<TrackMarker>> = HashMap::new();
+    let mut races = race_catalog(&global_b, |r| region_installed(game, r));
+    races.retain(|r| {
+        let m = markers.entry(r.region.clone()).or_insert_with(|| {
+            let path = format!("TRACKS/ROUTES{}/TrackPosMarkersAll.bin", r.region);
+            game.read(&path).ok().and_then(|b| parse_markers(&b).ok()).unwrap_or_default()
+        });
+        let (grid, start) = if r.reverse {
+            (MarkerKind::BackwardGrid, MarkerKind::BackwardStart)
+        } else {
+            (MarkerKind::ForwardGrid, MarkerKind::ForwardStart)
+        };
+        let has = |k: MarkerKind| m.iter().any(|x| x.track == r.track as u32 && x.kind == k);
+        has(grid) && has(start)
+    });
+    races
+}
+
+/// A race that can be started in the loaded region.
+#[derive(Clone, Debug)]
+pub struct RaceDef {
+    pub info: RaceInfo,
     /// Grid slots, front first.
     pub grid: Vec<Vec3>,
     pub start_line: Vec3,
@@ -125,9 +250,8 @@ pub struct RaceDef {
 }
 
 pub struct RoadData {
+    pub region: String,
     pub graph: RoadGraph,
-    pub tracks: Vec<TrackInfo>,
-    pub career: Vec<CareerRace>,
     pub races: Vec<RaceDef>,
     /// Named places in free roam (shops, garages), by name hash.
     pub places: Vec<TrackMarker>,
@@ -143,7 +267,8 @@ fn clean_name(n: &str) -> String {
 impl RoadData {
     pub fn load(game: &GameDir, region: &str) -> anyhow::Result<Self> {
         let dir = format!("TRACKS/ROUTES{region}");
-        let net = parse_routes(&game.read(&format!("{dir}/RoutesFreeRoam.bin"))?)?;
+        // The race-only regions have no streets for traffic.
+        let net = game.read(&format!("{dir}/RoutesFreeRoam.bin")).ok().and_then(|b| parse_routes(&b).ok()).unwrap_or_default();
         let markers = parse_markers(&game.read(&format!("{dir}/TrackPosMarkersAll.bin"))?)?;
         let places = game
             .read(&format!("{dir}/TrackPosMarkersFreeRoam.bin"))
@@ -151,44 +276,40 @@ impl RoadData {
             .and_then(|b| parse_markers(&b).ok())
             .unwrap_or_default();
         let global_b = game.read("GLOBAL/GLOBALB.BUN").or_else(|_| game.read_unpacked("GLOBAL/GlobalB.lzc"))?;
-        let tracks = parse_track_infos(&global_b)?;
-        let career = parse_career_races(&global_b).unwrap_or_default();
-
-        // One race per (track, direction) used by circuits and sprints in this region.
-        let mut seen = HashMap::new();
         let mut races = Vec::new();
-        for c in &career {
-            if !matches!(c.race_type, RaceType::Circuit | RaceType::Sprint) || seen.contains_key(&(c.track, c.reverse)) {
-                continue;
+        for info in race_catalog(&global_b, |r| r.eq_ignore_ascii_case(region)) {
+            let grid = if info.reverse { MarkerKind::BackwardGrid } else { MarkerKind::ForwardGrid };
+            if !markers.iter().any(|m| m.track == info.track as u32 && m.kind == grid) {
+                continue; // that direction is not raced
             }
-            let Some(info) = tracks.iter().find(|t| t.number == c.track && t.region.eq_ignore_ascii_case(region)) else {
-                continue;
-            };
-            seen.insert((c.track, c.reverse), ());
-            match build_race(game, &dir, &markers, info, c) {
+            match build_race(game, &dir, &markers, &info) {
                 Some(r) => races.push(r),
-                None => log::warn!("race {} ({}): incomplete data", c.track, info.name),
+                None => log::warn!("race {} ({}): incomplete data", info.track, info.name),
             }
         }
-        races.sort_by_key(|r| (r.kind != RaceType::Circuit, r.track, r.reverse));
         let graph = RoadGraph::build(net);
-        log::info!("roads: {} routes, {} junctions, {} races", graph.routes.len(), graph.nodes.len(), races.len());
-        Ok(Self { graph, tracks, career, races, places })
+        log::info!("roads {region}: {} routes, {} junctions, {} races", graph.routes.len(), graph.nodes.len(), races.len());
+        Ok(Self { region: region.to_string(), graph, races, places })
+    }
+
+    /// The loaded race for catalogue entry `info`.
+    pub fn race(&self, info: &RaceInfo) -> Option<&RaceDef> {
+        self.races.iter().find(|r| r.info.track == info.track && r.info.reverse == info.reverse)
     }
 }
 
-fn build_race(game: &GameDir, dir: &str, markers: &[TrackMarker], info: &TrackInfo, c: &CareerRace) -> Option<RaceDef> {
-    let (grid_kind, start_kind, finish_kind, suffix) = if c.reverse {
+fn build_race(game: &GameDir, dir: &str, markers: &[TrackMarker], info: &RaceInfo) -> Option<RaceDef> {
+    let (grid_kind, start_kind, finish_kind, suffix) = if info.reverse {
         (MarkerKind::BackwardGrid, MarkerKind::BackwardStart, MarkerKind::BackwardFinish, "B")
     } else {
         (MarkerKind::ForwardGrid, MarkerKind::ForwardStart, MarkerKind::ForwardFinish, "F")
     };
-    let of = |k: MarkerKind| markers.iter().filter(move |m| m.track == c.track as u32 && m.kind == k).map(|m| Vec3::from(m.pos));
+    let of = |k: MarkerKind| markers.iter().filter(move |m| m.track == info.track as u32 && m.kind == k).map(|m| Vec3::from(m.pos));
     let grid: Vec<Vec3> = of(grid_kind).collect();
     let start = of(start_kind).next()?;
     let finish = of(finish_kind).next();
-    let circuit = c.race_type == RaceType::Circuit;
-    let net = parse_routes(&game.read(&format!("{dir}/Routes{}{suffix}.bin", c.track)).ok()?).ok()?;
+    let circuit = info.mode.laps();
+    let net = parse_routes(&game.read(&format!("{dir}/Routes{}{suffix}.bin", info.track)).ok()?).ok()?;
     let raw = race_line(&net, [start.x, start.y], if circuit { None } else { finish.map(|f| [f.x, f.y]) }, info.length as f32, 4.0);
     if raw.len() < 20 || grid.is_empty() {
         return None;
@@ -198,15 +319,41 @@ fn build_race(game: &GameDir, dir: &str, markers: &[TrackMarker], info: &TrackIn
     let half_width: Vec<f32> = raw.iter().map(|p| p.left_width.min(p.right_width).clamp(3.0, 12.0)).collect();
     let length = if circuit { info.length as f32 } else { *dist.last()? };
     Some(RaceDef {
-        track: c.track,
-        name: clean_name(&info.name),
-        kind: c.race_type,
-        reverse: c.reverse,
-        laps: if circuit { c.laps.clamp(1, 5) } else { 1 },
-        reward: c.reward,
+        info: info.clone(),
         grid,
         start_line: start,
         finish_line: finish,
         line: RaceLine { points, dist, half_width, length, circuit },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn game() -> Option<GameDir> {
+        let g = GameDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."));
+        g.resolve("TRACKS/ROUTESL4RC").is_some().then_some(g)
+    }
+
+    #[test]
+    fn races_in_every_region() {
+        let Some(g) = game() else { return };
+        let all = installed_races(&g);
+        for mode in Mode::ALL {
+            let n = all.iter().filter(|r| r.mode == mode).count();
+            assert!(n >= 3, "{mode:?}: {n} races");
+        }
+        for region in ["L4RA", "L4RB", "L4RC", "L4RD", "L4RF", "L4RG"] {
+            let roads = RoadData::load(&g, region).unwrap();
+            let listed = all.iter().filter(|r| r.region == region).count();
+            assert_eq!(roads.races.len(), listed, "{region}: races built");
+            for r in &roads.races {
+                let line = &r.line;
+                // The line starts near the start line and covers the race.
+                assert!(line.points[0].truncate().distance(r.start_line.truncate()) < 30.0, "{} {}: start", region, r.info.name);
+                assert!(line.length > 200.0, "{} {}: {} m", region, r.info.name, line.length);
+            }
+        }
+    }
 }
