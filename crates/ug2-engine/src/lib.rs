@@ -1397,22 +1397,17 @@ impl Game {
 
 /// Street-lamp glows within reach of the camera, fading in the distance.
 fn push_world_glows(out: &mut Vec<GpuVertex>, lights: &[ug2_formats::light::WorldLight], eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) {
+    // As the PC game draws them (apitrace): a HEADLIGHTGLOW sprite 6 m wide, moved 4 m
+    // towards the camera, colour RGB (110, 100, 75) at alpha 220, added to the scene.
     for l in lights {
         let p = Vec3::from(l.position);
         let to = p - eye;
         let d = to.length();
-        if !(4.0..260.0).contains(&d) || to.dot(forward) < 0.0 {
+        if d < 4.5 || to.dot(forward) < 0.0 {
             continue;
         }
-        let fade = ((260.0 - d) / 80.0).clamp(0.0, 1.0) * ((d - 4.0) / 10.0).clamp(0.0, 1.0);
-        let size = (l.size * 0.06).clamp(0.9, 3.0) * (1.0 + d / 200.0);
-        let a = (150.0 * fade) as u8;
-        if a == 0 {
-            continue;
-        }
-        // Pull the sprite towards the camera so the lamp's own mesh does not clip it.
-        let c = p - to / d * 0.6;
-        glow_quad(out, c, size, [l.color[0], l.color[1], l.color[2], a], right, up);
+        let c = p - to / d * 4.0;
+        glow_quad(out, c, l.size * 0.5, [110, 100, 75, 220], right, up);
     }
 }
 
@@ -1449,8 +1444,11 @@ fn push_car_glows(out: &mut Vec<GpuVertex>, m: &ModelInfo, t: Mat4, brake: f32, 
     }
     let b = brake.clamp(0.0, 1.0);
     for p in &m.brakelights {
-        let alpha = (70.0 + 170.0 * b) as u8;
-        glow_quad(out, t.transform_point3(*p - Vec3::X * 0.06), 0.28 + 0.32 * b, [255, 40, 25, alpha], right, up);
+        // As the PC game (apitrace): about 1.6 m, from RGB (76, 14, 14) at alpha 143 as
+        // tail lights to (121, 23, 23) at 227 when braking.
+        let k = |lo: f32, hi: f32| (lo + (hi - lo) * b) as u8;
+        let color = [k(76.0, 121.0), k(14.0, 23.0), k(14.0, 23.0), k(143.0, 227.0)];
+        glow_quad(out, t.transform_point3(*p - Vec3::X * 0.06), 0.8, color, right, up);
     }
 }
 

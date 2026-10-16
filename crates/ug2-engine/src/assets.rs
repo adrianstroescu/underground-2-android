@@ -298,7 +298,19 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
             textures.extend(p.textures);
         }
         scenery.extend(d.scenery);
-        lights.extend(d.lights.into_iter().map(|l| (s.number as u16, l)));
+        // The game draws a glow at each light flare (the light records themselves are the
+        // lamps' lighting, not glows).
+        lights.extend(d.flares.into_iter().map(|f| {
+            let light = ug2_formats::light::WorldLight {
+                hash: 0,
+                kind: f.kind as u32,
+                color: [255; 4],
+                position: f.position,
+                size: GLOW_SIZE,
+                direction: f.direction,
+            };
+            (s.number as u16, light)
+        }));
         track_collision.extend(d.collision);
     }
     drop(stream);
@@ -419,6 +431,9 @@ fn d3d_color(c: u32) -> [u8; 4] {
 }
 
 pub type Buckets = HashMap<(Blend, u32, Role, u16), Vec<u32>>;
+
+/// Width of a lamp's glow in the PC game (apitrace): 6 m, whatever the distance.
+pub const GLOW_SIZE: f32 = 6.0;
 
 /// Material id of the car body paint (`CARSKIN`), resolved per car when drawing.
 pub const PAINT_MATERIAL: u16 = u16::MAX;

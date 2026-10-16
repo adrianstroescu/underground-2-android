@@ -99,16 +99,14 @@ impl Session {
     ) {
         let n = opponents.len() + 1;
         let slots: Vec<Vec3> = (0..n).map(|i| def.grid[i.min(def.grid.len() - 1)]).collect();
+        // Every grid slot faces along the race line. The slots stand side by side, up to
+        // 7 m to either side of the start marker, so aiming at the marker turned the outer
+        // ones towards the barriers.
         let face = |p: Vec3| {
-            let d = (def.start_line - p).truncate();
-            if d.length() > 0.5 {
-                d.y.atan2(d.x)
-            } else {
-                let i = def.line.locate(p, None);
-                let n = def.line.points.len();
-                let t = (def.line.points[(i + 1) % n] - def.line.points[i]).truncate();
-                t.y.atan2(t.x)
-            }
+            let i = def.line.locate(p, None);
+            let n = def.line.points.len();
+            let t = (def.line.points[(i + 1) % n] - def.line.points[i]).truncate();
+            t.y.atan2(t.x)
         };
         // Sideways offset of a grid slot from the race line (drag lanes).
         let lane_of = |p: Vec3| {

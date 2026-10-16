@@ -149,6 +149,8 @@ const MODE_CAR: f32 = 1.0;
 const MODE_GLASS: f32 = 2.0;
 const MODE_UNLIT: f32 = 3.0;
 const MODE_ROAD: f32 = 4.0;
+/// Unlit sprite coloured by its vertices (glows).
+const MODE_SPRITE: f32 = 5.0;
 
 const SLOT_STRIDE: u64 = 256;
 const SLOT_WORLD: u32 = 0;
@@ -157,7 +159,9 @@ const SLOT_WORLD_BLEND: u32 = 2;
 const SLOT_SKY: u32 = 3;
 const SLOT_GLOW: u32 = 4;
 const SLOT_ROAD: u32 = 5;
-const WORLD_SLOTS: u32 = 6;
+/// Additive world ranges (neon, lit windows): drawn without fog, as in the PC game.
+const SLOT_WORLD_ADD: u32 = 6;
+const WORLD_SLOTS: u32 = 7;
 /// Uniform slots per drawn car, at `WORLD_SLOTS + index * CAR_SLOTS`.
 const CAR_SLOTS: u32 = 11;
 const CAR_BODY: u32 = 0;
@@ -833,8 +837,10 @@ impl Renderer {
         // stays inside the far plane; it is drawn first without depth, so only direction matters.
         let sky_m = Mat4::from_translation(f.cam_pos - Vec3::Z * 60.0) * Mat4::from_scale(Vec3::splat(0.3));
         slots.push(slot(sky_m, one, [MODE_WORLD, 0.0, 0.0, vs], none));
-        slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.0, 1.0, 1.0], none));
+        // Glows: additive, so unfogged (the PC game turns fog off for additive draws).
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_SPRITE, 0.0, 0.0, 1.0], none));
         slots.push(slot(Mat4::IDENTITY, one, [MODE_ROAD, 0.0, 1.0, vs], none));
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.01, 0.0, vs], none));
         for c in f.cars {
             let first = slots.len();
             let t = c.transform;
@@ -1012,7 +1018,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipe_refl_add);
             for &i in &near {
                 draws += draw_ranges(&mut pass, &self.sections[i], &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_BLEND, r.texture))
+                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_ADD, r.texture))
                 });
             }
             if !f.glows.is_empty() {
@@ -1124,7 +1130,7 @@ impl Renderer {
             for &i in &visible {
                 let m = &self.sections[i];
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_BLEND, r.texture))
+                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_ADD, r.texture))
                 });
             }
             // Head and brake light lenses (additive textures).

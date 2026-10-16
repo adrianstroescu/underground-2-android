@@ -3,7 +3,7 @@
 
 use crate::bytes::{cstr_at, u32_at};
 use crate::chunk::{ids, ChunkIter};
-use crate::light::{parse_light_pack, WorldLight, LIGHT_PACK};
+use crate::light::{parse_flare_pack, parse_light_pack, LightFlare, WorldLight, FLARE_PACK, LIGHT_PACK};
 use crate::scenery::{parse_scenery_section, ScenerySection};
 use crate::solid::{parse_solid_list, SolidList};
 use crate::tpk::{parse_tpk, TexturePack};
@@ -52,6 +52,7 @@ pub struct SectionData {
     pub textures: Vec<TexturePack>,
     pub scenery: Vec<ScenerySection>,
     pub lights: Vec<WorldLight>,
+    pub flares: Vec<LightFlare>,
     pub collision: Vec<crate::collision::CollisionSection>,
 }
 
@@ -76,6 +77,10 @@ pub fn parse_region(stream: &[u8], start: usize, len: usize) -> SectionData {
                 Err(e) => log::warn!("scenery at {:#x}: {e}", c.offset),
             },
             crate::collision::TRACK_COLLISION => out.collision.extend(crate::collision::parse_collision(&c)),
+            FLARE_PACK => match parse_flare_pack(&c) {
+                Ok(f) => out.flares.extend(f),
+                Err(e) => log::warn!("flares at {:#x}: {e}", c.offset),
+            },
             LIGHT_PACK => match parse_light_pack(&c) {
                 Ok(l) => out.lights.extend(l),
                 Err(e) => log::warn!("lights at {:#x}: {e}", c.offset),

@@ -42,3 +42,29 @@ pub fn parse_light_pack(pack: &Chunk) -> Result<Vec<WorldLight>> {
     }
     Ok(out)
 }
+
+/// Light flares (container 0x80135100, records in 0x135102): where the game draws the
+/// glow of a street lamp or a lit sign at night. 48-byte records after 0x11 padding:
+/// 8 bytes, u32 hash, u32 colour, position, f32 max distance, direction, u8 kind,
+/// u8 flags, u16 section.
+pub const FLARE_PACK: u32 = 0x8013_5100;
+const FLARES: u32 = 0x0013_5102;
+const FLARE_LEN: usize = 48;
+
+#[derive(Clone, Copy, Debug)]
+pub struct LightFlare {
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+    pub kind: u8,
+    pub flags: u8,
+}
+
+pub fn parse_flare_pack(pack: &Chunk) -> Result<Vec<LightFlare>> {
+    let mut out = Vec::new();
+    let Some(c) = pack.child(FLARES) else { return Ok(out) };
+    let start = c.data.iter().take_while(|&&b| b == 0x11).count();
+    for rec in c.data[start..].chunks_exact(FLARE_LEN) {
+        out.push(LightFlare { position: vec3_at(rec, 16)?, direction: vec3_at(rec, 32)?, kind: rec[44], flags: rec[45] });
+    }
+    Ok(out)
+}

@@ -34,7 +34,7 @@ struct Material {
 struct Model {
     model: mat4x4<f32>,
     tint: vec4<f32>,
-    // x = mode (0 world, 1 car, 2 glass, 3 unlit), y = alpha cutoff, z = fog on,
+    // x = mode (0 world, 1 car, 2 glass, 3 unlit, 4 road, 5 sprite), y = alpha cutoff, z = fog on,
     // w = vertex colour scale
     params: vec4<f32>,
     // Light emitted on top of the lit colour (lamps), as a multiple of the texture.
@@ -131,7 +131,11 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSample(t_diffuse, s_diffuse, i.uv);
     var rgb: vec3<f32>;
     var a = tex.a * m.tint.a;
-    if (m.params.x > 3.5) {
+    if (m.params.x > 4.5) {
+        // Sprite (glows): texture times the vertex colour, unlit.
+        rgb = tex.rgb * i.color.rgb;
+        a = a * i.color.a;
+    } else if (m.params.x > 3.5) {
         // Street, as the game's worldreflect effect: baked lighting plus the mirrored
         // city at the same screen position, weighted by texture alpha x vertex alpha.
         // The surface itself is opaque.
