@@ -40,6 +40,8 @@ pub struct Vehicle {
     pub gear: i32,
     pub rpm: f32,
     pub nitro: f32,
+    /// Nitrous is firing this step.
+    pub nitro_on: bool,
     pub wheel_spin: f32,
     /// Height of the car origin above the ground (from wheel hub height and radius).
     pub ride_height: f32,
@@ -111,6 +113,7 @@ impl Vehicle {
             gear: 1,
             rpm: 0.0,
             nitro: 1.0,
+            nitro_on: false,
             wheel_spin: 0.0,
             ride_height,
             wheelbase,
@@ -231,6 +234,7 @@ impl Vehicle {
         if self.grounded {
             // Engine / brakes along the car.
             let nitro_on = c.nitro && self.nitro > 0.0 && c.throttle > 0.1;
+            self.nitro_on = nitro_on;
             if nitro_on {
                 self.nitro = (self.nitro - dt / (6.0 * self.perf.nitro.max(0.5))).max(0.0);
             } else {

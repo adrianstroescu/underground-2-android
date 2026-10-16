@@ -128,12 +128,26 @@ fn headlight(world: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
+    return shade(i);
+}
+
+struct GlowOut {
+    @location(1) glow: vec4<f32>,
+};
+
+// Lamp and car-light glows go to the glow target (the light-trail buffer), not the scene.
+@fragment
+fn fs_glow(i: VsOut) -> GlowOut {
+    return GlowOut(shade(i));
+}
+
+fn shade(i: VsOut) -> vec4<f32> {
     let tex = textureSample(t_diffuse, s_diffuse, i.uv);
     var rgb: vec3<f32>;
     var a = tex.a * m.tint.a;
     if (m.params.x > 4.5) {
-        // Sprite (glows): texture times the vertex colour, unlit.
-        rgb = tex.rgb * i.color.rgb;
+        // Sprite (glows), as the original's glow pixel shader: 2 x texture x vertex colour.
+        rgb = min(2.0 * tex.rgb * i.color.rgb, vec3<f32>(1.0));
         a = a * i.color.a;
     } else if (m.params.x > 3.5) {
         // Street, as the game's worldreflect effect: baked lighting plus the mirrored

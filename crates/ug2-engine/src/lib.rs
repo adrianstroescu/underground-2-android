@@ -22,6 +22,7 @@ pub mod render;
 pub mod roads;
 pub mod traffic;
 pub mod vehicle;
+pub mod visual;
 
 pub use ug2_audio::{music, sound};
 
@@ -174,6 +175,10 @@ pub struct Game {
     /// The region's visible section manager, the sections listed anywhere in it, and the
     /// drivable sections the current draw and collision sets were made for.
     visibility: Option<Box<VisibleSections>>,
+    env_maps: Option<Box<ug2_formats::envmap::EnvMaps>>,
+    visual: visual::VisualTreatment,
+    /// Length of the last frame, seconds.
+    frame_dt: f32,
     vis_listed: Vec<bool>,
     vis_view: Option<u16>,
     vis_cars: Vec<u16>,
@@ -288,6 +293,9 @@ impl Game {
             all_lights: Vec::new(),
             lights: Vec::new(),
             visibility: None,
+            env_maps: None,
+            visual: visual::VisualTreatment::default(),
+            frame_dt: 1.0 / 60.0,
             vis_listed: Vec::new(),
             vis_view: None,
             vis_cars: Vec::new(),
@@ -622,6 +630,11 @@ impl Game {
                         })
                         .collect();
                     self.traffic_material = list.iter().position(|m| m.name == "TRAFFIC").map_or(0, |i| i as u16 + 1);
+                }
+                LoadEvent::EnvMaps(m) => {
+                    log::info!("environment maps: {}", m.maps.len());
+                    self.env_maps = Some(m);
+                    self.visual.reset();
                 }
                 LoadEvent::Visibility(v) => {
                     let mut listed = Vec::new();
@@ -1252,7 +1265,15 @@ impl Game {
         }
         self.update_visibility(eye);
         push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
-        self.renderer.post_settings.bloom_intensity = if self.cfg.bloom { 0.6 } else { 0.0 };
+        let post = self.visual.frame(&visual::FrameInput {
+            maps: self.env_maps.as_deref(),
+            in_game: !orbit && self.spawned,
+            eye,
+            view,
+            dt: self.frame_dt,
+            boost: self.vehicle.nitro_on,
+            bloom_enabled: self.cfg.bloom,
+        });
         let data = FrameData {
             view,
             fov_y: self.camera.fov_y,
@@ -1275,6 +1296,7 @@ impl Game {
                 .flatten()
                 .map(|m| (headlight_projector(m, self.vehicle.transform()), HEADLIGHT_COLOR)),
             hud: &self.canvas.vertices,
+            post,
         };
         self.renderer.render(&self.gpu, target, width, height, &data);
         self.glows = glows;
@@ -1285,6 +1307,7 @@ impl Game {
         let now = Instant::now();
         let dt = (now - self.last).as_secs_f32();
         self.last = now;
+        self.frame_dt = dt;
         self.update(dt);
 
         let Some((surface, config)) = &self.surface else { return };

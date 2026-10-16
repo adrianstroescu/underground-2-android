@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 use crate::assets::{Blend, DrawRange, GpuVertex, MeshData, PreparedTexture, Role, PAINT};
 use crate::cars::CarModel;
 use crate::hud::HudVertex;
-use crate::post::{PostFx, PostSettings};
+use crate::post::{PostFrame, PostFx, SCENE_FORMAT, TRAIL_FORMAT};
 
 pub struct Gpu {
     pub instance: wgpu::Instance,
@@ -230,6 +230,8 @@ pub struct FrameData<'a> {
     /// worldheadlight effect: the HEADLIGHTS pattern lights the world it falls on.
     pub headlight: Option<(Mat4, [f32; 3])>,
     pub hud: &'a [HudVertex],
+    /// The visual treatment of this frame (speed blur, colour, bloom, trails).
+    pub post: PostFrame,
 }
 
 pub struct Renderer {
@@ -265,6 +267,8 @@ pub struct Renderer {
     pipe_add: wgpu::RenderPipeline,
     pipe_sky: wgpu::RenderPipeline,
     pipe_hud: wgpu::RenderPipeline,
+    /// Lamp and car-light glows, into the glow target.
+    pipe_glow: wgpu::RenderPipeline,
     hud_buf: wgpu::Buffer,
     hud_bg: wgpu::BindGroup,
     hud_vbuf: wgpu::Buffer,
@@ -280,7 +284,6 @@ pub struct Renderer {
     car_models: Vec<CarGpu>,
     targets: Option<Targets>,
     post: PostFx,
-    pub post_settings: PostSettings,
     pub stats_draws: u32,
 }
 
@@ -309,8 +312,8 @@ const FOG: [f32; 4] = [10.0, 250.0, 0.4, 0.0];
 impl Renderer {
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, msaa: u32) -> Self {
         let device = &gpu.device;
-        // The scene renders into an HDR target; the post pass writes `format`.
-        let scene_format = gpu.hdr_format;
+        // The scene is 8-bit as on the PC (A8R8G8B8); the post passes write `format`.
+        let scene_format = SCENE_FORMAT;
         let sample_count = if msaa > 1
             && gpu.adapter.get_texture_format_features(scene_format).flags.sample_count_supported(msaa)
             && gpu.adapter.get_texture_format_features(DEPTH).flags.sample_count_supported(msaa)
@@ -466,7 +469,19 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &attrs,
         };
-        let mesh_pipeline_n = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, depth_test: bool, samples: u32| {
+        // Main-pass pipelines have two targets, the scene and the glow target; only
+        // `pipe_glow` writes the second. The mirrored pass has the scene only.
+        let additive = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let mesh_pipeline_t = |label: &str,
+                               entry: &str,
+                               targets: &[Option<wgpu::ColorTargetState>],
+                               depth_write: bool,
+                               depth_test: bool,
+                               samples: u32| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&mesh_layout),
@@ -491,24 +506,44 @@ impl Renderer {
                 multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
                 fragment: Some(wgpu::FragmentState {
                     module: &mesh_shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(entry),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState { format: scene_format, blend, write_mask: wgpu::ColorWrites::ALL })],
+                    targets,
                 }),
                 multiview: None,
                 cache: None,
             })
         };
+        let no_glow = Some(wgpu::ColorTargetState { format: scene_format, blend: None, write_mask: wgpu::ColorWrites::empty() });
+        let mesh_pipeline_n = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, depth_test: bool, samples: u32| {
+            let scene = Some(wgpu::ColorTargetState { format: scene_format, blend, write_mask: wgpu::ColorWrites::ALL });
+            if samples == sample_count && !label.starts_with("refl") {
+                mesh_pipeline_t(label, "fs_main", &[scene, no_glow.clone()], depth_write, depth_test, samples)
+            } else {
+                mesh_pipeline_t(label, "fs_main", &[scene], depth_write, depth_test, samples)
+            }
+        };
         let mesh_pipeline = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, depth_test: bool| {
             mesh_pipeline_n(label, blend, depth_write, depth_test, sample_count)
         };
+        // SRCALPHA/ONE into the glow target, RGB only, depth tested (as the PC game).
+        let pipe_glow = mesh_pipeline_t(
+            "glow",
+            "fs_glow",
+            &[
+                Some(wgpu::ColorTargetState { format: scene_format, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                Some(wgpu::ColorTargetState {
+                    format: scene_format,
+                    blend: Some(wgpu::BlendState { color: additive, alpha: additive }),
+                    write_mask: wgpu::ColorWrites::COLOR,
+                }),
+            ],
+            false,
+            true,
+            sample_count,
+        );
         let pipe_opaque = mesh_pipeline("opaque", None, true, true);
         let pipe_blend = mesh_pipeline("blend", Some(wgpu::BlendState::ALPHA_BLENDING), false, true);
-        let additive = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::SrcAlpha,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        };
         let pipe_add = mesh_pipeline("additive", Some(wgpu::BlendState { color: additive, alpha: additive }), false, true);
         let pipe_sky = mesh_pipeline("sky", Some(wgpu::BlendState::ALPHA_BLENDING), false, false);
         // The mirrored pass renders single-sampled at half resolution.
@@ -562,11 +597,14 @@ impl Renderer {
                 module: &hud_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState { format: TRAIL_FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                ],
             }),
             multiview: None,
             cache: None,
@@ -618,6 +656,7 @@ impl Renderer {
             pipe_add,
             pipe_sky,
             pipe_hud,
+            pipe_glow,
             hud_buf,
             hud_bg,
             hud_vbuf,
@@ -630,8 +669,7 @@ impl Renderer {
             sky: Vec::new(),
             car_models: Vec::new(),
             targets: None,
-            post: PostFx::new(device, format, scene_format),
-            post_settings: PostSettings::default(),
+            post: PostFx::new(device, &gpu.queue, format, sample_count, DEPTH),
             stats_draws: 0,
         }
     }
@@ -776,7 +814,7 @@ impl Renderer {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let depth = mk(DEPTH, self.sample_count, "depth");
-        let msaa = (self.sample_count > 1).then(|| mk(gpu.hdr_format, self.sample_count, "msaa"));
+        let msaa = (self.sample_count > 1).then(|| mk(SCENE_FORMAT, self.sample_count, "msaa"));
         self.targets = Some(Targets { width, height, depth, msaa });
     }
 
@@ -902,7 +940,7 @@ impl Renderer {
                 })
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let color = mk(gpu.hdr_format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, "reflection");
+        let color = mk(SCENE_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, "reflection");
         let depth = mk(DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT, "reflection depth");
         self.reflection = Some(Reflection { width: w, height: h, color, depth });
         self.rebind_globals(gpu);
@@ -1029,26 +1067,46 @@ impl Renderer {
                 draws += 1;
             }
         }
+        let blur = f.post.speed_blur;
+        let c = FOG_COLOR;
+        let clear = wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: 1.0 };
+        let glow_count = f.glows.len() as u32;
         {
-            let scene = self.post.scene().expect("post targets");
+            // World: sky, opaque, translucent, additive. As on the PC, the cars follow
+            // after the speed blur, so they stay sharp.
+            let world = self.post.world_target();
             let (view, resolve) = match &targets.msaa {
-                Some(ms) => (ms, Some(scene)),
-                None => (scene, None),
+                Some(ms) => (ms, Some(world)),
+                None => (world, None),
             };
-            let c = FOG_COLOR;
+            let (glow_view, glow_resolve) = self.post.glow_target();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: resolve,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: 1.0 }),
-                        store: if resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
-                    },
-                })],
+                label: Some("world"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: resolve,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: if resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: glow_view,
+                        resolve_target: if blur.is_some() { None } else { glow_resolve },
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: if glow_resolve.is_some() || blur.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &targets.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        // The car pass after the speed blur draws against the world's depth.
+                        store: if blur.is_some() { wgpu::StoreOp::Store } else { wgpu::StoreOp::Discard },
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -1076,23 +1134,7 @@ impl Renderer {
                     Blend::Blend | Blend::Additive => None,
                 });
             }
-            // Cars: bodies and wheels.
-            let cars = car_list.clone();
-            for &(base, c, g) in &cars {
-                let solid = |r: &DrawRange| matches!(r.blend, Blend::Opaque | Blend::Cutout);
-                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
-                    solid(r).then(|| car_slot(base, c, r))
-                });
-                if let Some(m) = &g.wheel {
-                    for w in 0..4 {
-                        draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                            solid(r).then_some((base + CAR_WHEEL0 + w, r.texture))
-                        });
-                    }
-                }
-            }
-
-            // Translucent: world far to near, then the car.
+            // Translucent world, far to near.
             pass.set_pipeline(&self.pipe_blend);
             let mut order = visible.clone();
             order.sort_by(|&a, &b| {
@@ -1106,26 +1148,7 @@ impl Renderer {
                     (r.blend == Blend::Blend).then_some((SLOT_WORLD_BLEND, r.texture))
                 });
             }
-            // Car shadows, then glass, far to near.
-            let mut far_first = cars.clone();
-            far_first.sort_by(|a, b| {
-                let da = a.1.transform.w_axis.truncate().distance_squared(f.cam_pos);
-                let db = b.1.transform.w_axis.truncate().distance_squared(f.cam_pos);
-                db.total_cmp(&da)
-            });
-            for &(base, _, g) in &far_first {
-                if let Some(m) = &g.shadow {
-                    draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
-                        Some((base + CAR_SHADOW, r.texture))
-                    });
-                }
-            }
-            for &(base, c, g) in &far_first {
-                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend == Blend::Blend).then(|| car_slot(base, c, r))
-                });
-            }
-            // Glows last: order does not matter for additive blending.
+            // Additive world (neon, lamps).
             pass.set_pipeline(&self.pipe_add);
             for &i in &visible {
                 let m = &self.sections[i];
@@ -1133,34 +1156,130 @@ impl Renderer {
                     (r.blend == Blend::Additive).then_some((SLOT_WORLD_ADD, r.texture))
                 });
             }
-            // Head and brake light lenses (additive textures).
-            for &(base, c, g) in &far_first {
-                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
-                    (r.blend == Blend::Additive).then(|| car_slot(base, c, r))
-                });
+            if blur.is_none() {
+                draws += self.draw_cars_and_glows(&mut pass, f, &car_list, glow_count, glow_bytes.len() as u64);
             }
-            if !f.glows.is_empty() {
-                pass.set_bind_group(2, &self.model_bg, &[SLOT_GLOW * SLOT_STRIDE as u32]);
-                pass.set_bind_group(1, self.textures.get(&f.glow_texture).unwrap_or(&self.white), &[]);
-                pass.set_vertex_buffer(0, self.glow_vbuf.slice(..glow_bytes.len() as u64));
-                pass.draw(0..f.glows.len() as u32, 0..1);
-                draws += 1;
-            }
-
         }
-        // Bloom, tone and grading into the screen image, then the HUD on top.
+        if let Some(b) = &blur {
+            self.post.run_speed_blur(&gpu.queue, &mut encoder, b);
+            let cars = self.post.car_target();
+            let (view, resolve) = match &targets.msaa {
+                Some(ms) => (ms, Some(cars)),
+                None => (cars, None),
+            };
+            let (glow_view, glow_resolve) = self.post.glow_target();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cars"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: resolve,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: if resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: glow_view,
+                        resolve_target: glow_resolve,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: if glow_resolve.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &targets.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            // The world with its blurred copy over it, then the cars.
+            pass.set_pipeline(&self.post.blend_blur);
+            pass.set_bind_group(0, self.post.blend_bind_group(), &[]);
+            pass.draw(0..3, 0..1);
+            pass.set_bind_group(0, &self.globals_bg, &[]);
+            draws += 1 + self.draw_cars_and_glows(&mut pass, f, &car_list, glow_count, glow_bytes.len() as u64);
+        }
+        // Colour treatment, bloom and light trails into the screen image, then the HUD.
         let hud_count = f.hud.len() as u32;
-        self.post.run(&gpu.queue, &mut encoder, target, &self.post_settings, |pass| {
+        let (pipe_hud, hud_bg, hud_vbuf) = (&self.pipe_hud, &self.hud_bg, &self.hud_vbuf);
+        self.post.run(&gpu.queue, &mut encoder, target, &f.post, blur.is_some(), |pass| {
             if hud_count > 0 {
-                pass.set_pipeline(&self.pipe_hud);
-                pass.set_bind_group(0, &self.hud_bg, &[]);
-                pass.set_vertex_buffer(0, self.hud_vbuf.slice(..hud_bytes.len() as u64));
+                pass.set_pipeline(pipe_hud);
+                pass.set_bind_group(0, hud_bg, &[]);
+                pass.set_vertex_buffer(0, hud_vbuf.slice(..hud_bytes.len() as u64));
                 pass.draw(0..hud_count, 0..1);
             }
         });
-        draws += 5;
+        draws += if blur.is_some() { 10 } else { 8 };
         gpu.queue.submit(Some(encoder.finish()));
         self.stats_draws = draws;
+    }
+}
+
+impl Renderer {
+    /// Cars (bodies, wheels, shadows, glass and light lenses), then the glows into the
+    /// glow target. Order as on the PC: after the world and its speed blur.
+    fn draw_cars_and_glows(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        f: &FrameData,
+        cars: &[(u32, &CarDraw, &CarGpu)],
+        glow_count: u32,
+        glow_bytes: u64,
+    ) -> u32 {
+        let mut draws = 0;
+        pass.set_pipeline(&self.pipe_opaque);
+        for &(base, c, g) in cars {
+            let solid = |r: &DrawRange| matches!(r.blend, Blend::Opaque | Blend::Cutout);
+            draws += draw_ranges(pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                solid(r).then(|| car_slot(base, c, r))
+            });
+            if let Some(m) = &g.wheel {
+                for w in 0..4 {
+                    draws += draw_ranges(pass, m, &self.textures, &self.white, &self.model_bg, |r| {
+                        solid(r).then_some((base + CAR_WHEEL0 + w, r.texture))
+                    });
+                }
+            }
+        }
+        // Car shadows, then glass, far to near.
+        pass.set_pipeline(&self.pipe_blend);
+        let mut far_first = cars.to_vec();
+        far_first.sort_by(|a, b| {
+            let da = a.1.transform.w_axis.truncate().distance_squared(f.cam_pos);
+            let db = b.1.transform.w_axis.truncate().distance_squared(f.cam_pos);
+            db.total_cmp(&da)
+        });
+        for &(base, _, g) in &far_first {
+            if let Some(m) = &g.shadow {
+                draws += draw_ranges(pass, m, &self.textures, &self.white, &self.model_bg, |r| Some((base + CAR_SHADOW, r.texture)));
+            }
+        }
+        for &(base, c, g) in &far_first {
+            draws += draw_ranges(pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                (r.blend == Blend::Blend).then(|| car_slot(base, c, r))
+            });
+        }
+        // Head and brake light lenses (additive textures).
+        pass.set_pipeline(&self.pipe_add);
+        for &(base, c, g) in &far_first {
+            draws += draw_ranges(pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                (r.blend == Blend::Additive).then(|| car_slot(base, c, r))
+            });
+        }
+        if glow_count > 0 {
+            pass.set_pipeline(&self.pipe_glow);
+            pass.set_bind_group(2, &self.model_bg, &[SLOT_GLOW * SLOT_STRIDE as u32]);
+            pass.set_bind_group(1, self.textures.get(&f.glow_texture).unwrap_or(&self.white), &[]);
+            pass.set_vertex_buffer(0, self.glow_vbuf.slice(..glow_bytes));
+            pass.draw(0..glow_count, 0..1);
+            draws += 1;
+        }
+        draws
     }
 }
 

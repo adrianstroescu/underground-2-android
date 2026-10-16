@@ -137,6 +137,8 @@ pub enum LoadEvent {
     Lights(Vec<(u16, ug2_formats::light::WorldLight)>),
     /// Which sections the game draws from each drivable section (absent in some data).
     Visibility(Option<Box<VisibleSections>>),
+    /// The region's environment parameter maps (screen tint, fog...).
+    EnvMaps(Box<ug2_formats::envmap::EnvMaps>),
     Done,
     Failed(String),
 }
@@ -277,6 +279,7 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
     log::info!("{region}: {} scenery groups in {} sets", groups.groups.len(), set_names.len() - 1);
     let barrier_names = ug2_formats::collision::barrier_names(&index);
     send(LoadEvent::Visibility(VisibleSections::parse(&index).map(Box::new)));
+    send(LoadEvent::EnvMaps(Box::new(ug2_formats::envmap::EnvMaps::parse(&index))));
 
     send(LoadEvent::Progress("PARSING TRACK".into()));
     let mut solids: HashMap<u32, Arc<Solid>> = HashMap::new();
