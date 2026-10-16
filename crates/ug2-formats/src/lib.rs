@@ -26,6 +26,9 @@ pub mod visible;
 pub mod envmap;
 pub mod movie;
 pub mod lang;
+pub mod feng;
+pub mod font;
+pub mod feng_scene;
 
 pub use chunk::{Chunk, ChunkIter};
 pub use hash::bin_hash;

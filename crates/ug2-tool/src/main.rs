@@ -6,6 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+mod fng;
+
 use ug2_formats::chunk::walk;
 use ug2_formats::fs::GameDir;
 use ug2_formats::solid::{find_solid_lists, Solid};
@@ -26,6 +28,7 @@ fn main() -> Result<()> {
         Some("car") if args.len() >= 3 => car(&args[1], &args[2], args.get(3).map(PathBuf::from)),
         Some("track") if args.len() >= 2 => track(&args[1], args.get(2).map(String::as_str).unwrap_or("L4RA")),
         Some("textures") if args.len() >= 3 => textures(&args[1], Path::new(&args[2])),
+        Some("fng") if args.len() >= 4 => fng::render(&args[1], &args[2], Path::new(&args[3]), args.get(4).and_then(|t| t.parse().ok())),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -292,7 +295,7 @@ fn sanitize(s: &str) -> String {
     s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
 }
 
-fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
+pub(crate) fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<()> {
     let f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(f, w, h);
     enc.set_color(png::ColorType::Rgba);
