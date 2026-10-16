@@ -50,6 +50,12 @@ impl GameDir {
     }
 
     /// Reads a file, decompressing it if the whole file is one compressed block (.lzc).
+    /// Reads `rel`, preferring the 2004 original `rel.bak` when a mod replaced the file
+    /// (the owner's install has modded FrontB, GlobalB and language files).
+    pub fn read_original(&self, rel: &str) -> Result<Vec<u8>> {
+        self.read(&format!("{rel}.bak")).or_else(|_| self.read(rel))
+    }
+
     pub fn read_unpacked(&self, rel: &str) -> Result<Vec<u8>> {
         let data = self.read(rel)?;
         if compression::is_compressed(&data) {

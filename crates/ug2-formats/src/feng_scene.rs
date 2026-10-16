@@ -21,9 +21,15 @@ pub struct ObjectState {
     /// Milliseconds into the script.
     pub time: f32,
     pub running: bool,
-    /// Overrides set by game code (text, visibility).
+    /// Overrides set by game code (text, visibility, texture, position).
     pub text: Option<String>,
     pub hidden: Option<bool>,
+    /// Texture by name hash, for code-supplied images (menu icons).
+    pub texture: Option<u32>,
+    /// Position (x, y) replacing the scripted one.
+    pub position: Option<[f32; 2]>,
+    /// Multiplies the object's colour (RGBA 0..255).
+    pub tint: Option<[u8; 4]>,
 }
 
 pub struct Scene {
@@ -39,6 +45,8 @@ pub struct Scene {
 pub enum QuadSource {
     /// A texture by name (upper-case stem, e.g. "U2_MENU_BOX").
     Texture(String),
+    /// A texture by name hash.
+    TextureHash(u32),
     /// Untextured (white).
     Solid,
     /// A glyph from a font's texture.
@@ -63,7 +71,7 @@ impl Scene {
         let states = package
             .objects
             .iter()
-            .map(|_| ObjectState { script: INIT, time: 0.0, running: true, text: None, hidden: None })
+            .map(|_| ObjectState { script: INIT, time: 0.0, running: true, text: None, hidden: None, texture: None, position: None, tint: None })
             .collect();
         Self { package, states, to_game: Vec::new(), active_button: None }
     }
@@ -192,6 +200,16 @@ impl Scene {
         if let Some(s) = o.script(self.states[i].script) {
             apply_script(&mut d, s, self.states[i].time);
         }
+        if let Some([x, y]) = self.states[i].position {
+            d[field::POSITION] = x;
+            d[field::POSITION + 1] = y;
+        }
+        if let Some(t) = self.states[i].tint {
+            // B, G, R, A words.
+            for (w, k) in [(2, 0), (1, 1), (0, 2), (3, 3)] {
+                d[w] = d[w] * t[k] as f32 / 255.0;
+            }
+        }
         d
     }
 
@@ -221,8 +239,9 @@ impl Scene {
             let rgba = c.map(|x| x.clamp(0, 255) as u8);
             match o.kind {
                 ObjectKind::Image | ObjectKind::ColoredImage | ObjectKind::MultiImage | ObjectKind::SimpleImage => {
-                    let source = match o.resource.and_then(|r| self.package.resources.get(r)) {
-                        Some(r) if r.kind == ResourceKind::Image => QuadSource::Texture(r.texture_name()),
+                    let source = match (self.states[i].texture, o.resource.and_then(|r| self.package.resources.get(r))) {
+                        (Some(h), _) => QuadSource::TextureHash(h),
+                        (None, Some(r)) if r.kind == ResourceKind::Image => QuadSource::Texture(r.texture_name()),
                         _ => QuadSource::Solid,
                     };
                     let p = |x: f32, y: f32| {

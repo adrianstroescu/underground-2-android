@@ -10,6 +10,7 @@ pub mod collision;
 pub mod config;
 pub mod drift;
 pub mod font;
+pub mod fe;
 mod frontend;
 pub mod hud;
 pub mod input;
@@ -181,6 +182,10 @@ pub struct Game {
     movie: Option<ug2_movie::Movie>,
     movie_queue: std::collections::VecDeque<std::path::PathBuf>,
     movie_view: movie_view::MovieView,
+    /// The original frontend screens (FEng).
+    fe: fe::Frontend,
+    fe_verts: Vec<render::FeVertex>,
+    fe_batches: Vec<render::FeBatch>,
     /// The original game files.
     data_dir: std::path::PathBuf,
     visual: visual::VisualTreatment,
@@ -309,6 +314,9 @@ impl Game {
                 .filter_map(|m| GameDir::new(data_dir).resolve(m))
                 .collect(),
             movie_view,
+            fe: fe::Frontend::default(),
+            fe_verts: Vec::new(),
+            fe_batches: Vec::new(),
             data_dir: data_dir.to_path_buf(),
             visual: visual::VisualTreatment::default(),
             frame_dt: 1.0 / 60.0,
@@ -409,6 +417,34 @@ impl Game {
                 self.end_movie();
             }
             return;
+        }
+        if self.fe_active() {
+            let action = match &ev {
+                RawInput::Touch { phase: TouchPhase::Down, x, y, .. } => self.fe.tap(*x, *y, self.size),
+                RawInput::Key { code, pressed: true } if matches!(code.as_str(), "Escape" | "Backspace" | "BrowserBack") => {
+                    self.fe_back();
+                    None
+                }
+                RawInput::Key { code, pressed: true } => match code.as_str() {
+                    "ArrowLeft" => {
+                        self.fe.step(-1);
+                        None
+                    }
+                    "ArrowRight" => {
+                        self.fe.step(1);
+                        None
+                    }
+                    "Enter" | "Space" | "NumpadEnter" => self.fe.activate(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(a) = action {
+                self.fe_action(a);
+            }
+            if matches!(ev, RawInput::Touch { .. } | RawInput::Key { .. }) {
+                return;
+            }
         }
         if let RawInput::Touch { id, phase, x, y } = ev {
             if self.menu_visible() {
@@ -659,6 +695,15 @@ impl Game {
                         .collect();
                     self.traffic_material = list.iter().position(|m| m.name == "TRAFFIC").map_or(0, |i| i as u16 + 1);
                 }
+                LoadEvent::FeTextures(list) => {
+                    for t in &list {
+                        self.renderer.upload_fe_texture(&self.gpu, t);
+                    }
+                }
+                LoadEvent::Frontend(d) => {
+                    log::info!("frontend ready: {:?}", fe::labels(&d.strings));
+                    self.fe.data = Some(d);
+                }
                 LoadEvent::EnvMaps(m) => {
                     log::info!("environment maps: {}", m.maps.len());
                     self.env_maps = Some(m);
@@ -742,8 +787,62 @@ impl Game {
         }
     }
 
+    /// The original main menu replaces the title menu once the frontend data is in.
+    fn fe_active(&self) -> bool {
+        self.fe.screen.is_some() && self.screen == Screen::Title && self.menu_visible()
+    }
+
+    fn update_fe(&mut self, dt: f32) {
+        let want = self.screen == Screen::Title && self.menu_visible() && self.fe.ready();
+        if want && self.fe.screen.is_none() {
+            self.fe.open_main_menu();
+        } else if !want && self.fe.screen.is_some() {
+            self.fe.close();
+        }
+        self.fe.update(dt);
+    }
+
+    /// Back on an original screen: up one level; false at the main menu.
+    fn fe_back(&mut self) -> bool {
+        match self.fe.kind() {
+            Some(fe::FeKind::QuickRaceMode) => {
+                self.fe.open_main_menu();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn fe_action(&mut self, a: fe::FeAction) {
+        let row = match a {
+            fe::FeAction::Career => frontend::Row::Career,
+            fe::FeAction::QuickRace => {
+                self.fe.open_quick_race_modes();
+                return;
+            }
+            fe::FeAction::Customize => frontend::Row::Garage,
+            fe::FeAction::Options => frontend::Row::Options,
+            fe::FeAction::Mode(m) => {
+                // The track and options screens are still the port's own.
+                self.quick.mode = m;
+                self.quick.race = 0;
+                self.quick.laps = self.selected_race().map_or(2, |r| r.laps.max(1));
+                frontend::Row::QuickRace
+            }
+            fe::FeAction::FreeRun => frontend::Row::FreeRoam,
+        };
+        // Those rows live on the title screen's list.
+        if self.fe.kind() != Some(fe::FeKind::MainMenu) {
+            self.fe.open_main_menu();
+        }
+        if let Some(i) = self.rows().iter().position(|r| *r == row) {
+            self.menu_action(menu::MenuHit::Activate(i));
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
         self.update_movies();
+        self.update_fe(dt.clamp(0.0, 0.1));
         let dt = dt.clamp(0.0, 0.1);
         if dt > 0.0 {
             self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
@@ -1222,7 +1321,7 @@ impl Game {
             let text = format!("LOADING {name}");
             self.canvas.text(self.size.0 as f32 * 0.5, 90.0 * self.dp, 1.8 * self.dp, 0.5, &text, [1.0, 1.0, 1.0, 0.8]);
         }
-        if self.menu_visible() {
+        if self.menu_visible() && !self.fe_active() {
             self.build_menu();
             let size = vec2(self.size.0 as f32, self.size.1 as f32);
             self.menu.draw(&mut self.canvas, size, self.dp);
@@ -1325,6 +1424,13 @@ impl Game {
         }
         self.update_visibility(eye);
         push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
+        let mut fe_verts = std::mem::take(&mut self.fe_verts);
+        let mut fe_batches = std::mem::take(&mut self.fe_batches);
+        fe_verts.clear();
+        fe_batches.clear();
+        if self.fe_active() {
+            self.fe.draw((width, height), &mut fe_verts, &mut fe_batches);
+        }
         let post = self.visual.frame(&visual::FrameInput {
             maps: self.env_maps.as_deref(),
             in_game: !orbit && self.spawned,
@@ -1356,10 +1462,14 @@ impl Game {
                 .flatten()
                 .map(|m| (headlight_projector(m, self.vehicle.transform()), HEADLIGHT_COLOR)),
             hud: &self.canvas.vertices,
+            fe: &fe_verts,
+            fe_batches: &fe_batches,
             post,
         };
         self.renderer.render(&self.gpu, target, width, height, &data);
         self.glows = glows;
+        self.fe_verts = fe_verts;
+        self.fe_batches = fe_batches;
     }
 
     /// One iteration of the main loop: simulate and present.

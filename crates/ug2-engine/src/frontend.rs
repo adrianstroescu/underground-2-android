@@ -55,7 +55,7 @@ pub struct PendingRace {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Row {
+pub(crate) enum Row {
     Options,
     Reflections,
     Bloom,
@@ -105,7 +105,7 @@ impl Game {
         self.spawned && !self.switching && (self.screen != Screen::Playing || self.paused)
     }
 
-    fn rows(&self) -> Vec<Row> {
+    pub(crate) fn rows(&self) -> Vec<Row> {
         match self.screen {
             Screen::Title => vec![Row::Career, Row::QuickRace, Row::FreeRoam, Row::Car, Row::Garage, Row::Options],
             Screen::Options => vec![
@@ -161,7 +161,7 @@ impl Game {
         }
     }
 
-    fn selected_race(&self) -> Option<&RaceInfo> {
+    pub(crate) fn selected_race(&self) -> Option<&RaceInfo> {
         self.catalog.iter().filter(|r| r.mode == self.quick.mode).nth(self.quick.race)
     }
 
@@ -585,6 +585,9 @@ impl Game {
 
     /// Escape / Android Back / the pause button.
     pub(crate) fn back_pressed(&mut self) {
+        if self.screen == Screen::Title && self.fe_back() {
+            return;
+        }
         match self.screen {
             Screen::Playing => self.set_paused(!self.paused),
             Screen::QuickRace | Screen::Results | Screen::Career | Screen::Options => {

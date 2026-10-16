@@ -137,6 +137,10 @@ pub enum LoadEvent {
     Lights(Vec<(u16, ug2_formats::light::WorldLight)>),
     /// Which sections the game draws from each drivable section (absent in some data).
     Visibility(Option<Box<VisibleSections>>),
+    /// The original frontend: FEng packages, strings and fonts.
+    Frontend(Box<FrontendData>),
+    /// Frontend textures (menus, icons, fonts), kept for the session.
+    FeTextures(Vec<PreparedTexture>),
     /// The region's environment parameter maps (screen tint, fog...).
     EnvMaps(Box<ug2_formats::envmap::EnvMaps>),
     Done,
@@ -188,6 +192,9 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             // The part catalogue costs a moment to build: only up front if the saved car uses it.
             let mut lib = None;
             send_car(&game, &shared, &mut lib, &cfg, &cfg.car, &cfg.parts, &tx);
+            if let Err(e) = load_frontend(&game, cfg.bc_textures, &tx) {
+                log::warn!("frontend: {e:#}");
+            }
             let _ = tx.send(LoadEvent::Effects(Box::new(Effects::load(&game))));
             if let Err(e) = load_world(&game, &cfg.location, cfg.bc_textures, &tx) {
                 log::error!("load failed: {e:#}");
@@ -672,6 +679,63 @@ fn build_collision(
 
 /// Converts a parsed texture into an upload-ready mip chain. With BC support the
 /// DXT data is passed straight through; otherwise it is decoded to RGBA8.
+pub struct FrontendData {
+    pub packages: Vec<ug2_formats::feng::Package>,
+    pub strings: ug2_formats::lang::Strings,
+    pub fonts: Vec<ug2_formats::font::Font>,
+}
+
+/// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
+/// they use: FrontB's own, the menu boxes and icons in GLOBALB, the fonts in
+/// LanguageTextures and GLOBALA.
+fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
+    let t0 = std::time::Instant::now();
+    let front = ug2_formats::compression::decompress(&game.read_original("FRONTEND/FrontB.lzc")?)?.into_owned();
+    let packages = ug2_formats::feng::packages(&front);
+    let lang = game.read_original("LANGUAGES/English.bin")?;
+    let strings = ug2_formats::lang::Strings::parse(&lang);
+    let globala = game.read("GLOBAL/GLOBALA.BUN").unwrap_or_default();
+    let mut fonts = ug2_formats::font::fonts(&lang);
+    fonts.extend(ug2_formats::font::fonts(&globala));
+    let mut wanted: HashSet<u32> = HashSet::new();
+    for p in &packages {
+        for r in &p.resources {
+            wanted.insert(bin_hash(&r.texture_name()));
+        }
+    }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut take = |t: &Texture, out: &mut Vec<PreparedTexture>| {
+        if seen.insert(t.hash) {
+            out.extend(prepare_texture(t, bc));
+        }
+    };
+    for p in find_tpks(&front) {
+        p.textures.iter().for_each(|t| take(t, &mut out));
+    }
+    if let Ok(lt) = game.read("LANGUAGES/LanguageTextures.bin") {
+        for p in find_tpks(&lt) {
+            p.textures.iter().for_each(|t| take(t, &mut out));
+        }
+    }
+    for p in find_tpks(&globala) {
+        p.textures.iter().for_each(|t| take(t, &mut out));
+    }
+    if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
+        for p in find_tpks(&gb) {
+            for t in &p.textures {
+                if wanted.contains(&t.hash) || t.name.contains("ICON") || t.name.starts_with("U2_") {
+                    take(t, &mut out);
+                }
+            }
+        }
+    }
+    log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
+    let _ = tx.send(LoadEvent::FeTextures(out));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts })));
+    Ok(())
+}
+
 pub fn prepare_texture(t: &Texture, bc: bool) -> Option<PreparedTexture> {
     let levels = t.mip_levels();
     if levels.is_empty() || t.width == 0 || t.height == 0 {

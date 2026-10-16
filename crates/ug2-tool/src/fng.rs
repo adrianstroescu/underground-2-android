@@ -80,6 +80,7 @@ pub fn render(game_dir: &str, name: &str, out: &Path, ms: Option<f32>) -> Result
                 }
                 t
             }
+            QuadSource::TextureHash(h) => textures.get(h),
             QuadSource::Solid => None,
         };
         // Two triangles TL-TR-BR and TL-BR-BL.

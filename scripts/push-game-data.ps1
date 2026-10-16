@@ -39,11 +39,11 @@ function Push($rel) {
     throw "adb push failed for $rel"
 }
 
-foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata") { Push $d }
+foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata", "FRONTEND", "LANGUAGES") { Push $d }
 # The movies (~0.9 GB): EA/THX logos, the opening and the story scenes.
 if (-not $NoMovies) { Push "MOVIES" }
 if ($Full) {
-    foreach ($d in "TRACKS", "FRONTEND", "LANGUAGES") { Push $d }
+    foreach ($d in "TRACKS") { Push $d }
 } else {
     Push "TRACKS\LOC4DYNTEX.BIN"
     # Bayview, then the race-only regions: drags (B, D), drift (C), Street X (F), URL (G).

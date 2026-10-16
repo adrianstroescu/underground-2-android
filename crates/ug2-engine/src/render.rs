@@ -209,6 +209,23 @@ struct GpuMesh {
     section: u32,
 }
 
+/// A frontend vertex: screen pixels, texture coordinates, colour.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct FeVertex {
+    pub pos: [f32; 2],
+    pub uv: [f32; 2],
+    pub color: [f32; 4],
+}
+
+/// A run of frontend triangles sharing a texture (hash, 0 = untextured).
+#[derive(Clone, Copy, Debug)]
+pub struct FeBatch {
+    pub texture: u32,
+    pub first: u32,
+    pub count: u32,
+}
+
 /// Everything the renderer needs to draw one frame.
 pub struct FrameData<'a> {
     pub view: Mat4,
@@ -230,6 +247,9 @@ pub struct FrameData<'a> {
     /// worldheadlight effect: the HEADLIGHTS pattern lights the world it falls on.
     pub headlight: Option<(Mat4, [f32; 3])>,
     pub hud: &'a [HudVertex],
+    /// Frontend (FEng) quads, drawn under the HUD, and their batches.
+    pub fe: &'a [FeVertex],
+    pub fe_batches: &'a [FeBatch],
     /// The visual treatment of this frame (speed blur, colour, bloom, trails).
     pub post: PostFrame,
 }
@@ -269,6 +289,12 @@ pub struct Renderer {
     pipe_hud: wgpu::RenderPipeline,
     /// Lamp and car-light glows, into the glow target.
     pipe_glow: wgpu::RenderPipeline,
+    pipe_fe: wgpu::RenderPipeline,
+    fe_vbuf: wgpu::Buffer,
+    fe_capacity: u64,
+    /// Frontend textures (clamped sampling), by name hash.
+    fe_textures: HashMap<u32, wgpu::BindGroup>,
+    fe_sampler: wgpu::Sampler,
     hud_buf: wgpu::Buffer,
     hud_bg: wgpu::BindGroup,
     hud_vbuf: wgpu::Buffer,
@@ -609,6 +635,58 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let fe_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("fe"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/fe.wgsl").into()),
+        });
+        let fe_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fe"),
+            bind_group_layouts: &[&hud_layout_bg, &tex_layout],
+            push_constant_ranges: &[],
+        });
+        let fe_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
+        let pipe_fe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fe"),
+            layout: Some(&fe_pl),
+            vertex: wgpu::VertexState {
+                module: &fe_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<FeVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &fe_attrs,
+                }],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fe_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[
+                    Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL }),
+                    Some(wgpu::ColorTargetState { format: TRAIL_FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
+                ],
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let fe_capacity = 64 * 1024;
+        let fe_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fe vertices"),
+            size: fe_capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let fe_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("fe"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let hud_capacity = 64 * 1024;
         let hud_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("hud vertices"),
@@ -657,6 +735,11 @@ impl Renderer {
             pipe_sky,
             pipe_hud,
             pipe_glow,
+            pipe_fe,
+            fe_vbuf,
+            fe_capacity,
+            fe_textures: HashMap::new(),
+            fe_sampler,
             hud_buf,
             hud_bg,
             hud_vbuf,
@@ -671,6 +754,16 @@ impl Renderer {
             targets: None,
             post: PostFx::new(device, &gpu.queue, format, sample_count, DEPTH),
             stats_draws: 0,
+        }
+    }
+
+    /// A frontend texture (menus, fonts), kept for the whole session.
+    pub fn upload_fe_texture(&mut self, gpu: &Gpu, t: &PreparedTexture) {
+        if self.fe_textures.contains_key(&t.hash) {
+            return;
+        }
+        if let Some((bg, _)) = create_texture_bg(gpu, &self.tex_layout, &self.fe_sampler, t) {
+            self.fe_textures.insert(t.hash, bg);
         }
     }
 
@@ -969,6 +1062,19 @@ impl Renderer {
         if !hud_bytes.is_empty() {
             gpu.queue.write_buffer(&self.hud_vbuf, 0, hud_bytes);
         }
+        let fe_bytes: &[u8] = bytemuck::cast_slice(f.fe);
+        if fe_bytes.len() as u64 > self.fe_capacity {
+            self.fe_capacity = (fe_bytes.len() as u64).next_power_of_two();
+            self.fe_vbuf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("fe vertices"),
+                size: self.fe_capacity,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if !fe_bytes.is_empty() {
+            gpu.queue.write_buffer(&self.fe_vbuf, 0, fe_bytes);
+        }
         let glow_bytes: &[u8] = bytemuck::cast_slice(f.glows);
         if glow_bytes.len() as u64 > self.glow_capacity {
             self.glow_capacity = (glow_bytes.len() as u64).next_power_of_two();
@@ -1206,7 +1312,19 @@ impl Renderer {
         // Colour treatment, bloom and light trails into the screen image, then the HUD.
         let hud_count = f.hud.len() as u32;
         let (pipe_hud, hud_bg, hud_vbuf) = (&self.pipe_hud, &self.hud_bg, &self.hud_vbuf);
+        let (pipe_fe, fe_vbuf, fe_textures, white) = (&self.pipe_fe, &self.fe_vbuf, &self.fe_textures, &self.white);
+        let fe_batches = f.fe_batches;
         self.post.run(&gpu.queue, &mut encoder, target, &f.post, blur.is_some(), |pass| {
+            if !fe_batches.is_empty() {
+                pass.set_pipeline(pipe_fe);
+                pass.set_bind_group(0, hud_bg, &[]);
+                pass.set_vertex_buffer(0, fe_vbuf.slice(..fe_bytes.len() as u64));
+                for b in fe_batches {
+                    let tex = if b.texture == 0 { white } else { fe_textures.get(&b.texture).unwrap_or(white) };
+                    pass.set_bind_group(1, tex, &[]);
+                    pass.draw(b.first..b.first + b.count, 0..1);
+                }
+            }
             if hud_count > 0 {
                 pass.set_pipeline(pipe_hud);
                 pass.set_bind_group(0, hud_bg, &[]);
