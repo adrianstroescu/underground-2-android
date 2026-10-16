@@ -1243,6 +1243,11 @@ impl Game {
             reflect_height: (self.cfg.reflections > 0.01 && self.spawned)
                 .then(|| self.vehicle.pos.z - self.vehicle.ride_height),
             reflect_strength: self.cfg.reflections,
+            headlight: self
+                .spawned
+                .then(|| self.player_model())
+                .flatten()
+                .map(|m| (headlight_projector(m, self.vehicle.transform()), HEADLIGHT_COLOR)),
             hud: &self.canvas.vertices,
         };
         self.renderer.render(&self.gpu, target, width, height, &data);
@@ -1421,20 +1426,23 @@ fn push_car_glows(out: &mut Vec<GpuVertex>, m: &ModelInfo, t: Mat4, brake: f32, 
         let alpha = (70.0 + 170.0 * b) as u8;
         glow_quad(out, t.transform_point3(*p - Vec3::X * 0.06), 0.28 + 0.32 * b, [255, 40, 25, alpha], right, up);
     }
-    // Pool of light: a fan on the ground ahead of the car, bright at the centre. The
-    // glow texture is sampled at its white centre so only the vertex alpha shapes it.
-    let z = -m.physics.ride_height + 0.07;
-    let center = Vec3::new(m.front + 6.0, 0.0, z);
-    let (rx, ry) = (6.5, 3.4);
-    let uv = [0.5, 0.5];
-    let mid = GpuVertex { pos: t.transform_point3(center).into(), normal: [0.0; 3], color: [255, 236, 205, 55], uv };
-    let n = 18;
-    let rim = |i: usize| {
-        let a = i as f32 / n as f32 * std::f32::consts::TAU;
-        let p = center + Vec3::new(a.cos() * rx, a.sin() * ry, 0.0);
-        GpuVertex { pos: t.transform_point3(p).into(), normal: [0.0; 3], color: [255, 236, 205, 0], uv }
-    };
-    for i in 0..n {
-        out.extend_from_slice(&[mid, rim(i), rim(i + 1)]);
-    }
 }
+
+/// The player's headlight projector: from between the lamps, looking ahead and down,
+/// twice as wide as tall like the HEADLIGHTS pattern. Light falls on the road from a
+/// metre in front of the car to a hot spot about 12 m ahead.
+fn headlight_projector(m: &ModelInfo, t: Mat4) -> Mat4 {
+    let lamps = if m.headlights.is_empty() { vec![Vec3::new(m.front, 0.0, 0.0)] } else { m.headlights.clone() };
+    let local = lamps.iter().copied().sum::<Vec3>() / lamps.len() as f32;
+    let eye = t.transform_point3(local - Vec3::X * 0.3);
+    let pitch = HEADLIGHT_PITCH.to_radians();
+    let dir = t.transform_vector3(Vec3::new(pitch.cos(), 0.0, -pitch.sin())).normalize_or_zero();
+    let proj = Mat4::perspective_rh(HEADLIGHT_FOV_Y.to_radians(), 2.0, 0.3, 120.0);
+    proj * Mat4::look_to_rh(eye, dir, Vec3::Z)
+}
+
+/// Headlight projector set-up (the game sets these at run time; chosen so the beam
+/// pattern covers the lane ahead).
+const HEADLIGHT_PITCH: f32 = 12.0;
+const HEADLIGHT_FOV_Y: f32 = 30.0;
+const HEADLIGHT_COLOR: [f32; 3] = [0.85, 0.83, 0.76];

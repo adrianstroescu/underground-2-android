@@ -12,6 +12,9 @@ struct Globals {
     screen: vec4<f32>,
     // Fragments with dot(world, xyz) + w < 0 are clipped (the reflection pass).
     clip: vec4<f32>,
+    // The player's headlight projector and its colour (w = 1 when on).
+    headlight_vp: mat4x4<f32>,
+    headlight_color: vec4<f32>,
 };
 
 struct Model {
@@ -27,6 +30,7 @@ struct Model {
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var refl_tex: texture_2d<f32>;
 @group(0) @binding(2) var refl_samp: sampler;
+@group(0) @binding(3) var headlight_tex: texture_2d<f32>;
 @group(1) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(1) @binding(1) var s_diffuse: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
@@ -58,6 +62,23 @@ fn vs_main(v: VsIn) -> VsOut {
     return o;
 }
 
+// Light the player's headlights throw on world geometry (the game's worldheadlight
+// effect): the HEADLIGHTS pattern projected from the car, nothing behind the lamps.
+fn headlight(world: vec3<f32>) -> vec3<f32> {
+    if (g.headlight_color.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    let p = g.headlight_vp * vec4<f32>(world, 1.0);
+    if (p.w <= 0.05) {
+        return vec3<f32>(0.0);
+    }
+    let uv = vec2<f32>(p.x / p.w * 0.5 + 0.5, 0.5 - p.y / p.w * 0.5);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        return vec3<f32>(0.0);
+    }
+    return textureSampleLevel(headlight_tex, refl_samp, uv, 0.0).rgb * g.headlight_color.rgb;
+}
+
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSample(t_diffuse, s_diffuse, i.uv);
@@ -67,7 +88,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         // Street, as the game's worldreflect effect: baked lighting plus the mirrored
         // city at the same screen position, weighted by texture alpha x vertex alpha.
         // The surface itself is opaque.
-        rgb = tex.rgb * m.tint.rgb * i.color.rgb * m.params.w;
+        rgb = tex.rgb * m.tint.rgb * (i.color.rgb + headlight(i.world)) * m.params.w;
         let r = textureSampleLevel(refl_tex, refl_samp, i.clip.xy / g.screen.xy, 0.0).rgb;
         rgb = rgb + r * (tex.a * i.color.a * g.screen.z);
         a = 1.0;
@@ -103,7 +124,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         }
         rgb = rgb + tex.rgb * m.emissive.rgb;
     } else {
-        rgb = tex.rgb * m.tint.rgb * i.color.rgb * m.params.w;
+        rgb = tex.rgb * m.tint.rgb * (i.color.rgb + headlight(i.world)) * m.params.w;
         a = a * i.color.a;
     }
     if (a < m.params.y || dot(i.world, g.clip.xyz) + g.clip.w < 0.0) {

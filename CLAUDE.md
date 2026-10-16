@@ -145,9 +145,28 @@ See the `phone-test` skill. In short:
     - the envmap is looked up with the view-space reflection,
       × (EnvmapMin + (N·V)^EnvmapPower·EnvmapRange);
     - pixel: `2·tex·diffuse + 2·tex.a·(2·env·k + spec)`.
+  - **WORLDHEADLIGHT**: `rgb = sat(2·tex·(vc + HEADLIGHTS(projector uv)·clip·HeadlightColor))`.
+    `HEADLIGHTS` is a 128×64 beam pattern in GLOBALB. The clip texture, indexed by
+    depth·0.005+0.5, only cuts what is behind the projector. The projector pose and
+    colour are set at run time, so ours are chosen in `lib.rs::headlight_projector`.
+    Only the player's car projects. The old glow "pool" on the road is gone.
+  - Car light materials (GLOBALB `0x135200`), 28 floats from 0x30:
+    - `[0]` DiffuseMinScale, `[1..3]` DiffuseMin RGB, `[4]` DiffuseMaxScale,
+      `[5..7]` DiffuseMax RGB;
+    - `[8]` DiffuseMinAlpha, `[9]` DiffuseMaxAlpha;
+    - `[10]` SpecularPower, `[11]` SpecMinScale, `[12..14]` SpecMin RGB,
+      `[15]` SpecMaxScale, `[16..18]` SpecMax RGB;
+    - `[19]` EnvmapPower, `[20]` EnvMinScale, `[21..23]` EnvMin RGB,
+      `[24]` EnvMaxScale, `[25..27]` EnvMax RGB.
+    - The shader's Range = Max − Min, lerped by N·V. The diffuse alpha (1 → 0.05 on
+      paints) weights env and specular: a fresnel term.
+    - Car mesh groups name their material through the solid's shader hash:
+      `CARSKIN` is the body paint (replaced by the chosen paint), then CHROME, RUBBER,
+      WINDSHIELD, CALIPER, MAGSILVER... World signs use ALUMINUM and ALUMINUM_2.
+    - The SH light coefficients (HarmonicCoeff) are not in the data; they are built at
+      run time.
   - Also present: SKYMORPH, OVERBRIGHT (bloom), SCREENFILTER, DEPTH_OF_FIELD,
-    WORLDHEADLIGHT (headlight projection), RAIN_DROP, RUNWAYLIGHT, HORIZON_FOG and FE.
-    Not yet re-implemented.
+    RAIN_DROP, RUNWAYLIGHT, HORIZON_FOG and FE. Not yet re-implemented.
 
 ### Gameplay data
 

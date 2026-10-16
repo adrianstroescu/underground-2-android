@@ -93,6 +93,9 @@ struct Globals {
     ambient: [f32; 4],
     screen: [f32; 4],
     clip: [f32; 4],
+    /// The player's headlight projector (world to clip) and its colour (w = 1 when on).
+    headlight_vp: [[f32; 4]; 4],
+    headlight_color: [f32; 4],
 }
 
 #[repr(C)]
@@ -181,6 +184,9 @@ pub struct FrameData<'a> {
     pub reflect_height: Option<f32>,
     /// Road reflection strength, 0..1.
     pub reflect_strength: f32,
+    /// The player's headlight projector (world to clip) and colour, as the game's
+    /// worldheadlight effect: the HEADLIGHTS pattern lights the world it falls on.
+    pub headlight: Option<(Mat4, [f32; 3])>,
     pub hud: &'a [HudVertex],
 }
 
@@ -195,6 +201,10 @@ pub struct Renderer {
     refl_globals_bg: wgpu::BindGroup,
     refl_sampler: wgpu::Sampler,
     reflection: Option<Reflection>,
+    /// 1x1 black texture bound where nothing better is loaded yet.
+    dummy_view: wgpu::TextureView,
+    /// The game's HEADLIGHTS beam pattern, once the world textures are in.
+    headlight_view: Option<wgpu::TextureView>,
     pipe_refl_opaque: wgpu::RenderPipeline,
     pipe_refl_sky: wgpu::RenderPipeline,
     pipe_refl_add: wgpu::RenderPipeline,
@@ -292,6 +302,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
         let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -344,14 +364,15 @@ impl Renderer {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let globals_bg = globals_bind_group(device, &globals_layout, &globals_buf, &dummy_view, &refl_sampler);
+        let globals_bg = globals_bind_group(device, &globals_layout, &globals_buf, &dummy_view, &refl_sampler, &dummy_view);
         let refl_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("reflection globals"),
             size: std::mem::size_of::<Globals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let refl_globals_bg = globals_bind_group(device, &globals_layout, &refl_globals_buf, &dummy_view, &refl_sampler);
+        let refl_globals_bg =
+            globals_bind_group(device, &globals_layout, &refl_globals_buf, &dummy_view, &refl_sampler, &dummy_view);
         let model_slots = WORLD_SLOTS + CAR_SLOTS * 8;
         let (model_buf, model_bg) = create_model_buffer(device, &model_layout, model_slots);
         let glow_capacity = 64 * 1024;
@@ -510,7 +531,7 @@ impl Renderer {
             mips: 1,
             data: vec![255; 64],
         };
-        let white = create_texture_bg(gpu, &tex_layout, &sampler, &white_tex).expect("white texture");
+        let white = create_texture_bg(gpu, &tex_layout, &sampler, &white_tex).expect("white texture").0;
 
         Self {
             format,
@@ -522,6 +543,8 @@ impl Renderer {
             refl_globals_bg,
             refl_sampler,
             reflection: None,
+            dummy_view,
+            headlight_view: None,
             pipe_refl_opaque,
             pipe_refl_sky,
             pipe_refl_add,
@@ -560,9 +583,29 @@ impl Renderer {
         if self.textures.contains_key(&t.hash) {
             return;
         }
-        if let Some(bg) = create_texture_bg(gpu, &self.tex_layout, &self.sampler, t) {
+        if let Some((bg, view)) = create_texture_bg(gpu, &self.tex_layout, &self.sampler, t) {
             self.textures.insert(t.hash, bg);
+            if t.hash == ug2_formats::bin_hash("HEADLIGHTS") {
+                self.headlight_view = Some(view);
+                self.rebind_globals(gpu);
+            }
         }
+    }
+
+    /// Rebuilds the globals bind groups after the reflection target or the headlight
+    /// pattern changed.
+    fn rebind_globals(&mut self, gpu: &Gpu) {
+        let head = self.headlight_view.as_ref().unwrap_or(&self.dummy_view);
+        let refl = self.reflection.as_ref().map_or(&self.dummy_view, |r| &r.color);
+        self.globals_bg = globals_bind_group(&gpu.device, &self.globals_layout, &self.globals_buf, refl, &self.refl_sampler, head);
+        self.refl_globals_bg = globals_bind_group(
+            &gpu.device,
+            &self.globals_layout,
+            &self.refl_globals_buf,
+            &self.dummy_view,
+            &self.refl_sampler,
+            head,
+        );
     }
 
     pub fn texture_count(&self) -> usize {
@@ -677,6 +720,8 @@ impl Renderer {
             ambient: [0.30, 0.33, 0.42, 1.0],
             screen: [width as f32, height as f32, strength, 0.0],
             clip: [0.0, 0.0, 0.0, 1.0],
+            headlight_vp: f.headlight.map_or(Mat4::ZERO, |h| h.0).to_cols_array_2d(),
+            headlight_color: f.headlight.map_or([0.0; 4], |h| [h.1[0], h.1[1], h.1[2], 1.0]),
         };
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         // Mirror the camera in the street plane z = h and clip what is below it.
@@ -773,8 +818,8 @@ impl Renderer {
         };
         let color = mk(gpu.hdr_format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, "reflection");
         let depth = mk(DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT, "reflection depth");
-        self.globals_bg = globals_bind_group(&gpu.device, &self.globals_layout, &self.globals_buf, &color, &self.refl_sampler);
         self.reflection = Some(Reflection { width: w, height: h, color, depth });
+        self.rebind_globals(gpu);
     }
 
     /// Renders a frame into `target` (a swapchain image or an offscreen texture).
@@ -1038,7 +1083,7 @@ fn create_texture_bg(
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
     t: &PreparedTexture,
-) -> Option<wgpu::BindGroup> {
+) -> Option<(wgpu::BindGroup, wgpu::TextureView)> {
     let (bw, bh) = t.format.block_dimensions();
     let block_bytes = t.format.block_copy_size(None)? as u64;
     let mut expected = 0u64;
@@ -1071,14 +1116,15 @@ fn create_texture_bg(
         &t.data,
     );
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: None,
         layout,
         entries: &[
             wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
         ],
-    }))
+    });
+    Some((bg, view))
 }
 
 /// Uniform slot and texture for a car body range.
@@ -1101,6 +1147,7 @@ fn globals_bind_group(
     buf: &wgpu::Buffer,
     reflection: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    headlight: &wgpu::TextureView,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("globals"),
@@ -1109,6 +1156,7 @@ fn globals_bind_group(
             wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(reflection) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(headlight) },
         ],
     })
 }
