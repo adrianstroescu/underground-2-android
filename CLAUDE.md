@@ -168,6 +168,32 @@ See the `phone-test` skill. In short:
   - Also present: SKYMORPH, OVERBRIGHT (bloom), SCREENFILTER, DEPTH_OF_FIELD,
     RAIN_DROP, RUNWAYLIGHT, HORIZON_FOG and FE. Not yet re-implemented.
 
+### Run-time values captured from the PC game (apitrace, City Hall circuit at night)
+
+Captured with `tools/pc/apitrace.sh` and `tools/pc/ug2pc.py`; see the `ug2-reverse` skill.
+The traces live in `D:/GAME install/apitrace/traces/`.
+
+- **Fog**:
+  - world VS c8 `FogValue = (250, 1/240, 0.6, …)`, so `f = clamp((250 − viewZ)/240, 0.6, 1)`;
+  - fog starts at 10 m and is at most 40 % from 106 m on;
+  - `D3DRS_FOGCOLOR = 0xFF5D5F5A`, RGB (93, 95, 90).
+- **Car CAR-effect constants**:
+  - VS c0–c9 `HarmonicCoeff` (grey light, rgb equal, alpha differs), for example:
+    - c0 = (.2772, .2772, .2772, .3641) and c1 = (−.0446 …, −.0586);
+    - c2 = (.0384, .0504) and c3 = (.1476, .1939);
+    - c4 = (.2480, .3258) and c5 = (−.00464, −.0061);
+    - c6 = (−.0461, −.0606) and c7 = (.0759, .0997);
+    - c8 = (−.0263, −.0345) and c9 = (.4667, .6130).
+  - c17 is LocalEyePos.
+  - c18–c23 are DiffuseMin, DiffuseRange, SpecularMin, SpecularRange, SpecularPower
+    and EnvmapPower. For a paint: (.662, .655, .672, .993), (.41, .417, .251, −.828),
+    (1, 1.015, 1.038), (−.365, −.406, −.458), 5.72 and 0.262.
+- **Render targets**:
+  - post-processing: 3× full-screen RGBA8 and 3× half-screen;
+  - road reflection: 2× 320×240;
+  - car reflection: a 128 render-target cube map, plus a static 256 cube map.
+  - The output is LDR (A8R8G8B8).
+
 ### Gameplay data
 
 - Race lines come from `Routes<track><F|B>.bin`, chained by race distance

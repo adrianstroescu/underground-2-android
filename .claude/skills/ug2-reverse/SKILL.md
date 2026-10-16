@@ -54,6 +54,33 @@ The data almost always has the answer. Guessing has been wrong before:
   above, with walls in red, infinite walls in yellow and the race line as dots.
   Export race lines with a scratch crate that includes `roads.rs`.
 
+## The original game as a reference (owner approved)
+
+The PC game is installed in the parent folder and may be launched for reference
+shots and traces. The owner's career save is in it, so **never save, buy or
+progress the career**. Use Quick Race. The game runs as a borderless window
+(WidescreenFix `WindowedMode = 4`).
+
+- `python -I tools/pc/ug2pc.py launch | keys enter right*3 wait:2 | shot NAME DIR | close`.
+  Keys and shots only work while speed2.exe is the foreground window. If the owner
+  is using the PC (another window in front), stop and ask them to click into the game.
+- Menu path to a race:
+  1. Enter at the title screens leads to Main Menu (Quick Race selected).
+  2. Then Enter for the mode (Circuit), Enter for the track (City Hall first), Enter
+     for the options, Enter for the car, then Enter for automatic.
+  3. The race starts about 15 s later.
+- **apitrace** (installed permanently in `D:/GAME install/apitrace`, owner's request):
+  1. `bash tools/pc/apitrace.sh on`, then launch and play a few seconds;
+  2. close the game, then `apitrace.sh off`. Recording is slow, and a 1 min trace is
+     about 2 GB.
+  3. The trace is written to `C:/Users/Adi/Desktop/speed2.trace`. Move it to
+     `D:/GAME install/apitrace/traces/`.
+  4. Find frames with `apitrace.exe dump --calls=frame T | grep Present`. Dump one
+     frame with `--calls=A-B`.
+- Shader constants are re-sent from register 0 for every draw (the whole constant
+  table). Match them to the effect's constant table from `d3dasm.py` (for example
+  24 vectors means the CAR vertex shader).
+
 ## A scratch crate for engine logic
 
 The engine's test binaries crash on this PC, so make a crate in the scratchpad:
