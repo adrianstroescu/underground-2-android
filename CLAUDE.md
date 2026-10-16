@@ -188,6 +188,16 @@ The traces live in `D:/GAME install/apitrace/traces/`.
   - c18–c23 are DiffuseMin, DiffuseRange, SpecularMin, SpecularRange, SpecularPower
     and EnvmapPower. For a paint: (.662, .655, .672, .993), (.41, .417, .251, −.828),
     (1, 1.015, 1.038), (−.365, −.406, −.458), 5.72 and 0.262.
+- **Glows**:
+  - Lamp glows sit at the light flares (`0x135102`). Each is HEADLIGHTGLOW 6 m wide,
+    moved 4 m towards the camera, colour RGB (110, 100, 75) at alpha 220, blended
+    SRCALPHA/ONE.
+  - In the road reflection the same sprite is stretched to 6 × 16 m.
+  - Tail lights are about 1.6 m, from (76, 14, 14) at alpha 143 to (121, 23, 23) at
+    alpha 227 when braking.
+  - Every additive draw has FOGENABLE false.
+- **Grid**: race grid slots sit side by side up to 7 m from the start marker, and
+  they all face along the race line.
 - **Render targets**:
   - post-processing: 3× full-screen RGBA8 and 3× half-screen;
   - road reflection: 2× 320×240;

@@ -59,6 +59,11 @@ screenshots:
   and QUIT TO MENU (1156, 982). The BACK key also pauses.
 - Rows move when menus change, so take a screenshot and check before tapping
   blind.
+- **Taps in the garage or pause menu change the owner's car** (paint, parts, car
+  choice). The owner's setup is `car = 3000GT`, `paint = 0.05, 0.45, 0.15` and no
+  `parts.3000GT` line. Check `ug2.cfg` after a test and restore it.
+- Live Caption (a black box with Romanian song lyrics) is an Android overlay, not the
+  game.
 
 ## Autopilot (testing aid)
 
