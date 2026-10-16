@@ -4,7 +4,7 @@ struct Globals {
     view_proj: mat4x4<f32>,
     cam_pos: vec4<f32>,
     fog_color: vec4<f32>,
-    // x = fog start, y = fog end, z = fog strength
+    // x = fog start, y = where it would be complete, z = most fog (view depth, metres)
     fog: vec4<f32>,
     light_dir: vec4<f32>,
     ambient: vec4<f32>,
@@ -48,6 +48,8 @@ struct VsOut {
     @location(1) color: vec4<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) world: vec3<f32>,
+    // Distance along the view direction (fog, as the game's per-vertex fog).
+    @location(4) depth: f32,
 };
 
 @vertex
@@ -59,6 +61,7 @@ fn vs_main(v: VsIn) -> VsOut {
     o.color = v.color;
     o.normal = (m.model * vec4<f32>(v.normal, 0.0)).xyz;
     o.world = world.xyz;
+    o.depth = o.clip.w;
     return o;
 }
 
@@ -131,8 +134,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     if (m.params.z > 0.5) {
-        let d = distance(i.world, g.cam_pos.xyz);
-        let f = clamp((d - g.fog.x) / (g.fog.y - g.fog.x), 0.0, 1.0) * g.fog.z;
+        let f = min(clamp((i.depth - g.fog.x) / (g.fog.y - g.fog.x), 0.0, 1.0), g.fog.z);
         rgb = mix(rgb, g.fog_color.rgb, f);
     }
     return vec4<f32>(rgb, a);

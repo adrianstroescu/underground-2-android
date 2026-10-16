@@ -60,7 +60,10 @@ impl ChaseCamera {
         };
         let mut eye = car.pos - dir * back + Vec3::Z * height;
         if let Some(w) = world {
-            if let Some((gz, _)) = w.ground(eye, 3.0, 10.0) {
+            // Only ground at about the car's level: the track collision also has tunnel
+            // ceilings and overpass decks, which the camera must stay under.
+            let probe = Vec3::new(eye.x, eye.y, car.pos.z + 1.0);
+            if let Some((gz, _)) = w.ground(probe, 1.5, 10.0) {
                 eye.z = eye.z.max(gz + 0.6);
             }
         }

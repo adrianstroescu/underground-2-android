@@ -256,7 +256,11 @@ struct Targets {
 }
 
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-pub const FOG_COLOR: [f32; 4] = [0.055, 0.07, 0.11, 1.0];
+/// D3DRS_FOGCOLOR of the PC game at night (0xFF5D5F5A, read from an apitrace capture).
+pub const FOG_COLOR: [f32; 4] = [93.0 / 255.0, 95.0 / 255.0, 90.0 / 255.0, 1.0];
+/// The world effect's FogValue (250, 1/240, 0.6): linear in view depth from 10 m, at
+/// most 40 % from 106 m on.
+const FOG: [f32; 4] = [10.0, 250.0, 0.4, 0.0];
 
 impl Renderer {
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, msaa: u32) -> Self {
@@ -715,7 +719,7 @@ impl Renderer {
             view_proj: view_proj.to_cols_array_2d(),
             cam_pos: f.cam_pos.extend(1.0).into(),
             fog_color: FOG_COLOR,
-            fog: [f.draw_distance * 0.25, f.draw_distance, 0.92, 0.0],
+            fog: FOG,
             light_dir: light.extend(0.0).into(),
             ambient: [0.30, 0.33, 0.42, 1.0],
             screen: [width as f32, height as f32, strength, 0.0],
@@ -795,10 +799,11 @@ impl Renderer {
         (view_proj, refl_view_proj)
     }
 
-    /// Half-resolution reflection target; rebinds the main globals to sample it.
-    fn ensure_reflection(&mut self, gpu: &Gpu, width: u32, height: u32) {
-        // A third of the screen: blurred and seen at grazing angles, more is wasted.
-        let (w, h) = ((width / 3).max(1), (height / 3).max(1));
+    /// The road reflection target; rebinds the main globals to sample it.
+    fn ensure_reflection(&mut self, gpu: &Gpu) {
+        // The PC game renders the mirrored city into a 320x240 target at any screen
+        // size (seen in an apitrace capture), which is what softens it.
+        let (w, h) = (320, 240);
         if self.reflection.as_ref().is_some_and(|r| r.width == w && r.height == h) {
             return;
         }
@@ -827,7 +832,7 @@ impl Renderer {
         self.ensure_targets(gpu, width, height);
         self.post.ensure(&gpu.device, width, height);
         if f.reflect_height.is_some() {
-            self.ensure_reflection(gpu, width, height);
+            self.ensure_reflection(gpu);
         }
         let (view_proj, refl_view_proj) = self.write_uniforms(gpu, f, width, height);
         gpu.queue.write_buffer(&self.hud_buf, 0, bytemuck::cast_slice(&[width as f32, height as f32, 0.0, 0.0]));
