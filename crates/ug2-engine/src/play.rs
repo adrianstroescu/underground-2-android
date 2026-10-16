@@ -178,7 +178,9 @@ impl Session {
             for (k, o) in self.opponents.iter_mut().enumerate() {
                 let prog = &race.cars[k + 1];
                 if countdown || prog.finish_time.is_some() {
-                    o.controls = Controls { brake: if countdown { 0.0 } else { 1.0 }, ..Controls::default() };
+                    // Stop past the line; held at a standstill the brake would reverse.
+                    let rolling = o.vehicle.vel.dot(o.vehicle.forward()) > 0.5;
+                    o.controls = Controls { brake: if !countdown && rolling { 1.0 } else { 0.0 }, ..Controls::default() };
                     continue;
                 }
                 let path = line_path(line, prog.index, o.lane, 70);

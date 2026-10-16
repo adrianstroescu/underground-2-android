@@ -35,6 +35,7 @@ use glam::{vec2, Mat4, Vec3};
 use ug2_formats::bin_hash;
 use ug2_formats::carinfo::WheelInfo;
 use ug2_formats::fs::GameDir;
+use ug2_formats::visible::VisibleSections;
 
 use crate::assets::{spawn_loader, GpuVertex, LoadEvent, LoadRequest, Loader, LoaderConfig};
 use crate::camera::ChaseCamera;
@@ -167,7 +168,15 @@ pub struct Game {
     autopilot: Option<crate::ai::AiDriver>,
     /// Seconds the autopilot has been stuck (it is put back on the line after 3).
     autopilot_stuck: f32,
+    /// World lights with their streaming section, and those of the visible sections.
+    all_lights: Vec<(u16, ug2_formats::light::WorldLight)>,
     lights: Vec<ug2_formats::light::WorldLight>,
+    /// The region's visible section manager, the sections listed anywhere in it, and the
+    /// drivable sections the current draw and collision sets were made for.
+    visibility: Option<Box<VisibleSections>>,
+    vis_listed: Vec<bool>,
+    vis_view: Option<u16>,
+    vis_cars: Vec<u16>,
     vehicle: Vehicle,
     models: HashMap<String, ModelInfo>,
     physics: HashMap<String, ModelPhysics>,
@@ -273,7 +282,12 @@ impl Game {
             lane_input: 0.0,
             autopilot: None,
             autopilot_stuck: 0.0,
+            all_lights: Vec::new(),
             lights: Vec::new(),
+            visibility: None,
+            vis_listed: Vec::new(),
+            vis_view: None,
+            vis_cars: Vec::new(),
             vehicle: Vehicle::new(Vec3::ZERO, 0.0, 0.16, 2.6),
             models: HashMap::new(),
             physics: HashMap::new(),
@@ -438,7 +452,9 @@ impl Game {
         self.renderer.clear_world(&drop);
         self.world = None;
         self.roads = None;
+        self.all_lights.clear();
         self.lights.clear();
+        self.visibility = None;
         self.world_loading = true;
         self.switching = true;
         self.status = Status::Loading("LOADING".into());
@@ -584,8 +600,27 @@ impl Game {
                 LoadEvent::Collision(c) => {
                     self.world = Some(c);
                     self.groups_for = None;
+                    self.vis_cars.clear();
                 }
-                LoadEvent::Lights(l) => self.lights = l,
+                LoadEvent::Lights(l) => {
+                    self.lights = l.iter().map(|(_, l)| l.clone()).collect();
+                    self.all_lights = l;
+                    self.vis_view = None;
+                }
+                LoadEvent::Visibility(v) => {
+                    let mut listed = Vec::new();
+                    for &s in v.iter().flat_map(|v| v.lists.values()).flatten() {
+                        if listed.len() <= s as usize {
+                            listed.resize(s as usize + 1, false);
+                        }
+                        listed[s as usize] = true;
+                    }
+                    log::info!("visible sections: {} drivable", v.as_ref().map_or(0, |v| v.lists.len()));
+                    self.visibility = v;
+                    self.vis_listed = listed;
+                    self.vis_view = None;
+                    self.vis_cars.clear();
+                }
                 LoadEvent::Spawn { pos, yaw } => {
                     self.vehicle.reset(pos, yaw);
                     self.camera.snap(&self.vehicle);
@@ -594,7 +629,7 @@ impl Game {
                         self.status = Status::Ready;
                     }
                 }
-                LoadEvent::Section(s) => self.renderer.add_section(&self.gpu, &s.mesh, s.sky, s.group),
+                LoadEvent::Section(s) => self.renderer.add_section(&self.gpu, &s.mesh, s.sky, s.group, s.number),
                 LoadEvent::Done => {
                     log::info!(
                         "loaded: {} sections, {} textures",
@@ -676,7 +711,9 @@ impl Game {
             // Rev on the line, but stay put (held below: the brake pedal would reverse).
             controls = Controls { throttle: controls.throttle, ..Controls::default() };
         } else if finished {
-            controls = Controls { brake: 0.4, ..Controls::default() };
+            // Coast to a stop past the line; held at a standstill the brake would reverse.
+            let rolling = self.vehicle.vel.dot(self.vehicle.forward()) > 0.5;
+            controls = Controls { brake: if rolling { 0.4 } else { 0.0 }, ..Controls::default() };
         } else if playing && race_mode == Some(RaceMode::Drag) {
             if self.cfg.autopilot {
                 controls = Controls { throttle: 1.0, ..Controls::default() };
@@ -876,6 +913,50 @@ impl Game {
             w.set_groups_on(on);
         }
         self.groups_for = Some(track);
+    }
+
+    /// Like the original's visible section manager: draws only the sections listed for
+    /// the drivable section the camera is on, and keeps collision for the sections seen
+    /// from wherever a car is (so a car out of view still has its road under it).
+    fn update_visibility(&mut self, eye: Vec3) {
+        let Some(vis) = &self.visibility else { return };
+        let on_for = |listed: &[bool], lists: &[&[u16]]| {
+            // Sections no list mentions (the sky) are always there.
+            let mut on: Vec<bool> = listed.iter().map(|&l| !l).collect();
+            for &s in lists.iter().copied().flatten() {
+                if let Some(v) = on.get_mut(s as usize) {
+                    *v = true;
+                }
+            }
+            on
+        };
+        let view = vis.drivable_at(eye.x, eye.y);
+        if view != self.vis_view {
+            let list = view.and_then(|s| vis.visible_from(s)).unwrap_or(&[]);
+            let on = on_for(&self.vis_listed, &[list]);
+            self.renderer.set_sections_on(on.clone());
+            self.lights = self
+                .all_lights
+                .iter()
+                .filter(|(s, _)| on.get(*s as usize).copied().unwrap_or(true))
+                .map(|(_, l)| l.clone())
+                .collect();
+            self.vis_view = view;
+        }
+        let mut cars: Vec<u16> = std::iter::once(self.vehicle.pos)
+            .chain(self.session.opponents.iter().map(|o| o.vehicle.pos))
+            .chain(self.session.traffic.cars.iter().map(|c| c.vehicle.pos))
+            .filter_map(|p| vis.drivable_at(p.x, p.y))
+            .collect();
+        cars.sort_unstable();
+        cars.dedup();
+        if cars != self.vis_cars {
+            if let Some(w) = &mut self.world {
+                let lists: Vec<&[u16]> = cars.iter().filter_map(|&s| vis.visible_from(s)).collect();
+                w.set_sections_on(on_for(&self.vis_listed, &lists));
+                self.vis_cars = cars;
+            }
+        }
     }
 
     /// The computer's controls for the player's car (testing aid).
@@ -1143,6 +1224,7 @@ impl Game {
                 push_car_glows(&mut glows, m, t, c.brake_light, right, up);
             }
         }
+        self.update_visibility(eye);
         push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
         self.renderer.post_settings.bloom_intensity = if self.cfg.bloom { 0.6 } else { 0.0 };
         let data = FrameData {

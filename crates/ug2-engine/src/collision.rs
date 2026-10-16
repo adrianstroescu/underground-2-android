@@ -15,6 +15,8 @@ pub struct Tri {
     pub owner: u32,
     /// Scenery group set the triangle belongs to (0 = always there).
     pub group: u16,
+    /// Scenery section the triangle comes from.
+    pub section: u16,
 }
 
 pub struct CollisionWorld {
@@ -23,8 +25,11 @@ pub struct CollisionWorld {
     pub tris: Vec<Tri>,
     pub owners: Vec<String>,
     group: u16,
+    section: u16,
     /// Which group sets are switched on (race barriers); index 0 is unused.
     groups_on: Vec<bool>,
+    /// Which scenery sections are loaded, by number (empty: all of them).
+    sections_on: Vec<bool>,
 }
 
 impl Default for CollisionWorld {
@@ -38,7 +43,16 @@ const WALL_NZ: f32 = 0.6;
 
 impl CollisionWorld {
     pub fn new(cell: f32) -> Self {
-        Self { cell, cells: HashMap::new(), tris: Vec::new(), owners: Vec::new(), group: 0, groups_on: Vec::new() }
+        Self {
+            cell,
+            cells: HashMap::new(),
+            tris: Vec::new(),
+            owners: Vec::new(),
+            group: 0,
+            section: 0,
+            groups_on: Vec::new(),
+            sections_on: Vec::new(),
+        }
     }
 
     fn key(&self, x: f32, y: f32) -> (i32, i32) {
@@ -48,9 +62,10 @@ impl CollisionWorld {
     /// `ground_ok` false keeps only the wall part (used for buildings, whose roofs
     /// should not catch a car that clips into them).
     /// Names the object whose triangles are added next.
-    pub fn begin_owner(&mut self, name: &str, group: u16) {
+    pub fn begin_owner(&mut self, name: &str, group: u16, section: u16) {
         self.owners.push(name.to_string());
         self.group = group;
+        self.section = section;
     }
 
     /// Switches scenery group sets on or off (`on[set]`); sets past the end are off.
@@ -58,8 +73,15 @@ impl CollisionWorld {
         self.groups_on = on;
     }
 
+    /// Loads only the given scenery sections (`on[number]`, numbers past the end stay
+    /// loaded); empty loads every section.
+    pub fn set_sections_on(&mut self, on: Vec<bool>) {
+        self.sections_on = on;
+    }
+
     fn active(&self, t: &Tri) -> bool {
-        t.group == 0 || self.groups_on.get(t.group as usize).copied().unwrap_or(false)
+        (t.group == 0 || self.groups_on.get(t.group as usize).copied().unwrap_or(false))
+            && self.sections_on.get(t.section as usize).copied().unwrap_or(true)
     }
 
     pub fn add(&mut self, a: Vec3, b: Vec3, c: Vec3, ground_ok: bool) {
@@ -78,7 +100,7 @@ impl CollisionWorld {
         }
         let idx = self.tris.len() as u32;
         let owner = self.owners.len().saturating_sub(1) as u32;
-        self.tris.push(Tri { a, b, c, n, wall, owner, group: self.group });
+        self.tris.push(Tri { a, b, c, n, wall, owner, group: self.group, section: self.section });
         let min = a.min(b).min(c);
         let max = a.max(b).max(c);
         let (k0, k1) = (self.key(min.x, min.y), self.key(max.x, max.y));

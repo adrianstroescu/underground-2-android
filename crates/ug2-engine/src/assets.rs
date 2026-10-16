@@ -7,12 +7,14 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
+use ug2_formats::bin_hash;
 use ug2_formats::carinfo::CarUsage;
 use ug2_formats::fs::GameDir;
 use ug2_formats::scenery::{SceneryGroups, SceneryInstance, ScenerySection, GROUP_CONTROLLED};
 use ug2_formats::solid::Solid;
 use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 use ug2_formats::track::{parse_region, parse_streaming_sections};
+use ug2_formats::visible::VisibleSections;
 
 use crate::cars::{load_car, CarModel, SharedCarData};
 use crate::sound::{Effects, EngineSound};
@@ -124,8 +126,11 @@ pub enum LoadEvent {
     Collision(CollisionWorld),
     Spawn { pos: Vec3, yaw: f32 },
     Section(SectionAsset),
-    /// Street lamps and other world lights, drawn as glows at night.
-    Lights(Vec<ug2_formats::light::WorldLight>),
+    /// Street lamps and other world lights, drawn as glows at night, with the number of
+    /// the streaming section holding each.
+    Lights(Vec<(u16, ug2_formats::light::WorldLight)>),
+    /// Which sections the game draws from each drivable section (absent in some data).
+    Visibility(Option<Box<VisibleSections>>),
     Done,
     Failed(String),
 }
@@ -264,6 +269,7 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
     }
     log::info!("{region}: {} scenery groups in {} sets", groups.groups.len(), set_names.len() - 1);
     send(LoadEvent::Groups(set_names));
+    send(LoadEvent::Visibility(VisibleSections::parse(&index).map(Box::new)));
 
     send(LoadEvent::Progress("PARSING TRACK".into()));
     let mut solids: HashMap<u32, Arc<Solid>> = HashMap::new();
@@ -284,7 +290,7 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
             textures.extend(p.textures);
         }
         scenery.extend(d.scenery);
-        lights.extend(d.lights);
+        lights.extend(d.lights.into_iter().map(|l| (s.number as u16, l)));
     }
     drop(stream);
     // Shared world textures (street furniture, cranes, ships...) live outside the stream.
@@ -361,12 +367,15 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
     Ok(())
 }
 
+/// The texture's blend type picks the draw: 2 = additive (neon, glows, lit windows),
+/// 1 = alpha blended (glass, fences, shadows), 0 = not blended. With type 0 an alpha
+/// channel is a mask (on roads, how much the street reflects), not transparency.
 pub fn blend_for(t: &Texture) -> Blend {
-    match t.alpha {
-        AlphaUsage::Opaque => Blend::Opaque,
-        AlphaUsage::Cutout => Blend::Cutout,
-        AlphaUsage::Blend if t.alpha_blend == 1 => Blend::Additive,
-        AlphaUsage::Blend => Blend::Blend,
+    match (t.alpha, t.alpha_blend) {
+        (_, 2) => Blend::Additive,
+        (AlphaUsage::Cutout, _) => Blend::Cutout,
+        (AlphaUsage::Blend, 1) => Blend::Blend,
+        _ => Blend::Opaque,
     }
 }
 
@@ -401,12 +410,13 @@ fn d3d_color(c: u32) -> [u8; 4] {
 pub type Buckets = HashMap<(Blend, u32, Role), Vec<u32>>;
 
 /// Appends a solid's mesh transformed by `m`, bucketing indices by texture.
+/// `texture_of(texture, shader)` gets each group's texture and shader name hashes.
 pub fn append_solid(
     s: &Solid,
     m: &Mat4,
     vertices: &mut Vec<GpuVertex>,
     buckets: &mut Buckets,
-    texture_of: &dyn Fn(u32) -> (u32, Blend, Role),
+    texture_of: &dyn Fn(u32, u32) -> (u32, Blend, Role),
     bbox: &mut (Vec3, Vec3),
 ) {
     let Some(mesh) = &s.mesh else { return };
@@ -427,7 +437,8 @@ pub fn append_solid(
     }
     for g in &mesh.groups {
         let hash = s.textures.get(g.texture as usize).copied().unwrap_or(0);
-        let (tex, blend, role) = texture_of(hash);
+        let shader = s.shaders.get(g.shader as usize).copied().unwrap_or(0);
+        let (tex, blend, role) = texture_of(hash, shader);
         let out = buckets.entry((blend, tex, role)).or_default();
         let idx = &mesh.indices[g.first_index as usize..(g.first_index + g.index_count) as usize];
         out.extend(idx.iter().map(|&i| base + i as u32));
@@ -486,16 +497,19 @@ fn build_section_mesh(
     let mut vertices = Vec::new();
     let mut buckets = HashMap::new();
     let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    let road_shader = bin_hash("ROAD");
     for (i, inst) in sc.instances.iter().enumerate() {
         if instance_set(sc, i, inst, sets) != Some(set) {
             continue;
         }
         let Some(solid) = instance_solid(sc, inst, solids) else { continue };
-        // Street surfaces get the reflective road role (opaque groups only).
-        let road = sc.infos.get(inst.info as usize).is_some_and(|i| i.name.contains("ROAD"));
-        let texture_of = |h: u32| {
-            let b = blend_of.get(&h).copied().unwrap_or(Blend::Opaque);
-            (h, b, if road && b == Blend::Opaque { Role::Road } else { Role::Normal })
+        // Groups with the ROAD shader (the game's worldreflect effect) are opaque: their
+        // texture alpha is how much of the mirrored city shows, not transparency.
+        let texture_of = |h: u32, shader: u32| {
+            if shader == road_shader {
+                return (h, Blend::Opaque, Role::Road);
+            }
+            (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal)
         };
         let m = Mat4::from_cols_array(&inst.matrix());
         append_solid(solid, &m, &mut vertices, &mut buckets, &texture_of, &mut bbox);
@@ -509,7 +523,7 @@ fn build_sky_mesh(sc: &ScenerySection, solids: &HashMap<u32, Arc<Solid>>, blend_
     let mut vertices = Vec::new();
     let mut buckets = HashMap::new();
     let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    let texture_of = |h: u32| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal);
+    let texture_of = |h: u32, _| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal);
     for inst in &sc.instances {
         if !sc.infos[inst.info as usize].name.starts_with("SKYDOME") {
             continue;
@@ -549,7 +563,7 @@ fn build_collision(
             let Some(mesh) = &solid.mesh else { continue };
             let m = Mat4::from_cols_array(&inst.matrix());
             let pts: Vec<Vec3> = mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))).collect();
-            world.begin_owner(&solid.name, set);
+            world.begin_owner(&solid.name, set, sc.number as u16);
             for t in mesh.indices.chunks_exact(3) {
                 world.add(pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize], terrain);
             }

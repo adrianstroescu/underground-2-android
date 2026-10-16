@@ -64,21 +64,13 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     var rgb: vec3<f32>;
     var a = tex.a * m.tint.a;
     if (m.params.x > 3.5) {
-        // Street: baked lighting plus the mirrored city, softened with 4 taps and
-        // stronger at grazing angles.
+        // Street, as the game's worldreflect effect: baked lighting plus the mirrored
+        // city at the same screen position, weighted by texture alpha x vertex alpha.
+        // The surface itself is opaque.
         rgb = tex.rgb * m.tint.rgb * i.color.rgb * m.params.w;
-        a = a * i.color.a;
-        let uv = i.clip.xy / g.screen.xy;
-        let o = vec2<f32>(1.5, 1.5) / g.screen.xy;
-        var r = textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(o.x, o.y), 0.0).rgb;
-        r += textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(-o.x, o.y), 0.0).rgb;
-        r += textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(o.x, -o.y), 0.0).rgb;
-        r += textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(-o.x, -o.y), 0.0).rgb;
-        r *= 0.25;
-        let v = normalize(g.cam_pos.xyz - i.world);
-        let fres = 0.2 + 0.8 * pow(1.0 - clamp(v.z, 0.0, 1.0), 4.0);
-        let k = fres * g.screen.z;
-        rgb = rgb * (1.0 - 0.3 * k) + r * k;
+        let r = textureSampleLevel(refl_tex, refl_samp, i.clip.xy / g.screen.xy, 0.0).rgb;
+        rgb = rgb + r * (tex.a * i.color.a * g.screen.z);
+        a = 1.0;
     } else if (m.params.x > 2.5) {
         // Unlit (shadows, decals).
         rgb = tex.rgb * m.tint.rgb;

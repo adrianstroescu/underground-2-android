@@ -33,7 +33,8 @@ impl AiDriver {
     pub fn drive(&mut self, v: &Vehicle, path: &[Vec3], dt: f32) -> Controls {
         let mut c = Controls::default();
         if path.len() < 2 {
-            c.brake = 1.0;
+            // End of the line: stop, without backing up once stopped.
+            c.brake = (v.vel.dot(v.forward()) > 0.5) as u8 as f32;
             return c;
         }
         let pos = v.pos;

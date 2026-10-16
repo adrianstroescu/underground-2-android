@@ -160,6 +160,8 @@ struct GpuMesh {
     bbox_max: Vec3,
     /// Scenery group set (0 = always drawn).
     group: u16,
+    /// Scenery section number.
+    section: u32,
 }
 
 /// Everything the renderer needs to draw one frame.
@@ -218,6 +220,8 @@ pub struct Renderer {
     sections: Vec<GpuMesh>,
     /// Which scenery group sets are drawn (race barriers); index 0 is unused.
     groups_on: Vec<bool>,
+    /// Which scenery sections are visible from where the camera is (empty: all).
+    sections_on: Vec<bool>,
     sky: Vec<GpuMesh>,
     car_models: Vec<CarGpu>,
     targets: Option<Targets>,
@@ -542,6 +546,7 @@ impl Renderer {
             white,
             sections: Vec::new(),
             groups_on: Vec::new(),
+            sections_on: Vec::new(),
             sky: Vec::new(),
             car_models: Vec::new(),
             targets: None,
@@ -578,12 +583,13 @@ impl Renderer {
             contents: bytemuck::cast_slice(&m.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        Some(GpuMesh { vbuf, ibuf, ranges: m.ranges.clone(), bbox_min: m.bbox_min, bbox_max: m.bbox_max, group: 0 })
+        Some(GpuMesh { vbuf, ibuf, ranges: m.ranges.clone(), bbox_min: m.bbox_min, bbox_max: m.bbox_max, group: 0, section: 0 })
     }
 
-    pub fn add_section(&mut self, gpu: &Gpu, mesh: &MeshData, sky: bool, group: u16) {
+    pub fn add_section(&mut self, gpu: &Gpu, mesh: &MeshData, sky: bool, group: u16, section: u32) {
         if let Some(mut m) = Self::upload_mesh(gpu, mesh) {
             m.group = group;
+            m.section = section;
             if sky {
                 self.sky.push(m);
             } else {
@@ -597,13 +603,21 @@ impl Renderer {
         self.groups_on = on;
     }
 
+    /// Draws only the given scenery sections (`on[number]`, numbers past the end are
+    /// drawn); empty draws every section.
+    pub fn set_sections_on(&mut self, on: Vec<bool>) {
+        self.sections_on = on;
+    }
+
     fn section_on(&self, m: &GpuMesh) -> bool {
-        m.group == 0 || self.groups_on.get(m.group as usize).copied().unwrap_or(false)
+        (m.group == 0 || self.groups_on.get(m.group as usize).copied().unwrap_or(false))
+            && self.sections_on.get(m.section as usize).copied().unwrap_or(true)
     }
 
     /// Drops the world (sections, sky and the given textures) before another region loads.
     pub fn clear_world(&mut self, textures: &[u32]) {
         self.sections.clear();
+        self.sections_on.clear();
         self.sky.clear();
         for h in textures {
             self.textures.remove(h);
@@ -986,6 +1000,12 @@ impl Renderer {
                 let m = &self.sections[i];
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
                     (r.blend == Blend::Additive).then_some((SLOT_WORLD_BLEND, r.texture))
+                });
+            }
+            // Head and brake light lenses (additive textures).
+            for &(base, c, g) in &far_first {
+                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Additive).then(|| car_slot(base, c, r))
                 });
             }
             if !f.glows.is_empty() {

@@ -55,7 +55,7 @@ impl Default for GameConfig {
             draw_distance: 650.0,
             vertex_light_scale: 2.0,
             traffic: true,
-            reflections: 0.55,
+            reflections: 1.0,
             bloom: true,
             parts: HashMap::new(),
         }
@@ -70,8 +70,19 @@ impl GameConfig {
                 cfg.apply(&text);
                 // Files written before version 2 defaulted to the joystick; the touch
                 // buttons are the default now.
-                if !text.lines().any(|l| l.trim_start().starts_with("version")) {
+                let version = text
+                    .lines()
+                    .find_map(|l| l.trim_start().strip_prefix("version"))
+                    .and_then(|v| v.trim_start_matches([' ', '=']).split_whitespace().next()?.parse::<u32>().ok());
+                if version.is_none() {
                     cfg.steer_mode = SteerMode::Buttons;
+                }
+                // Before version 3 reflections were a 0..1 fresnel blend (default 0.55); now
+                // 1 is the original game's road reflection.
+                if version.unwrap_or(0) < 3 {
+                    if cfg.reflections > 0.01 {
+                        cfg.reflections = 1.0;
+                    }
                     cfg.save(path);
                 }
             }
@@ -159,7 +170,7 @@ impl GameConfig {
         }
         format!(
             "# Underground 2 Android settings\n\
-             version = 2\n\
+             version = 3\n\
              car = {}\n\
              location = {}\n\
              paint = {}, {}, {}\n\
@@ -172,7 +183,7 @@ impl GameConfig {
              draw_distance = {}\n\
              vertex_light_scale = {}\n\
              traffic = {}\n\
-             reflections = {}   # road reflections 0..1, 0 = off\n\
+             reflections = {}   # road reflections 0..1: 1 = as the original, 0 = off\n\
              bloom = {}\n{}{}",
             self.car,
             self.location,

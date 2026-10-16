@@ -134,7 +134,7 @@ pub fn load_car(
     } else {
         None
     };
-    let texture_of = |h: u32| -> (u32, Blend, Role) {
+    let texture_of = |h: u32, _shader: u32| -> (u32, Blend, Role) {
         if h == skin1 && !skins.is_empty() {
             return (h, Blend::Opaque, Role::Skin);
         }
@@ -178,7 +178,7 @@ pub fn load_car(
     for (hash, kind) in parts {
         let Some(s) = solids.iter().find(|s| s.hash == hash) else { continue };
         for &t in &s.textures {
-            used.insert(texture_of(t).0);
+            used.insert(texture_of(t, 0).0);
         }
         match kind {
             PartKind::Body => {
@@ -198,7 +198,7 @@ pub fn load_car(
                     // Aftermarket rim (with tyre), scaled to the car's wheel size.
                     Some(r) => {
                         for &t in &r.textures {
-                            used.insert(texture_of(t).0);
+                            used.insert(texture_of(t, 0).0);
                         }
                         let radius = ((r.bbox_max[2] - r.bbox_min[2]) * 0.5).max(0.05);
                         let m = Mat4::from_scale(Vec3::splat(stock_radius / radius));
@@ -220,7 +220,7 @@ pub fn load_car(
         let marker = solids.iter().find(|s| s.hash == base).and_then(|s| s.markers.iter().find(|m| m.hash == SPOILER_MARKER));
         if let Some(m) = marker {
             for &t in &sp.textures {
-                used.insert(texture_of(t).0);
+                used.insert(texture_of(t, 0).0);
             }
             let at = Mat4::from_cols_array(&m.matrix);
             append_solid(sp, &at, &mut body_v, &mut body_b, &texture_of, &mut body_box);
