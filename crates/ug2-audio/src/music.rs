@@ -53,15 +53,20 @@ impl Music {
 
 /// Converts decoded interleaved i16 at `rate` to 48 kHz stereo and queues it,
 /// waiting while the queue is full.
-struct Sink<'a> {
+pub struct Sink<'a> {
     ring: &'a Ring,
     stop: &'a AtomicBool,
     pos: f64,
     last: [f32; 2],
 }
 
-impl Sink<'_> {
-    fn push(&mut self, pcm: &[i16], channels: usize, rate: u32) -> bool {
+impl<'a> Sink<'a> {
+    pub fn new(ring: &'a Ring, stop: &'a AtomicBool) -> Self {
+        Self { ring, stop, pos: 0.0, last: [0.0; 2] }
+    }
+
+    /// Queues PCM; false once `stop` is set.
+    pub fn push(&mut self, pcm: &[i16], channels: usize, rate: u32) -> bool {
         let channels = channels.max(1);
         let frames = pcm.len() / channels;
         let step = rate as f64 / RATE as f64;

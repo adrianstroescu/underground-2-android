@@ -4,6 +4,7 @@ members = [
     "crates/ug2-formats",
     "crates/ug2-tool",
     "crates/ug2-audio",
+    "crates/ug2-movie",
     "crates/ug2-engine",
     "crates/ug2-desktop",
     "crates/ug2-android",
@@ -19,6 +20,11 @@ repository = "https://github.com/adrianstroescu/underground-2-android"
 ug2-formats = { path = "crates/ug2-formats" }
 ug2-engine = { path = "crates/ug2-engine" }
 ug2-audio = { path = "crates/ug2-audio" }
+ug2-movie = { path = "crates/ug2-movie" }
+# The VP6 decoder of NihAV, relicensed MIT for Ruffle.
+nihav_core = { git = "https://github.com/ruffle-rs/nihav-vp6", rev = "12d0bdf10a85641dc2de3d6900c747894431ed77" }
+nihav_codec_support = { git = "https://github.com/ruffle-rs/nihav-vp6", rev = "12d0bdf10a85641dc2de3d6900c747894431ed77" }
+nihav_duck = { git = "https://github.com/ruffle-rs/nihav-vp6", rev = "12d0bdf10a85641dc2de3d6900c747894431ed77" }
 # Vulkan only: Android target; DX12 also breaks windows-gnu dev builds.
 wgpu = { version = "25", default-features = false, features = ["vulkan", "wgsl"] }
 glam = { version = "0.30", features = ["bytemuck"] }

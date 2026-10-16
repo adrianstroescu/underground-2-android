@@ -1063,6 +1063,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nihav_codec_support"
+version = "0.1.0"
+source = "git+https://github.com/ruffle-rs/nihav-vp6?rev=12d0bdf10a85641dc2de3d6900c747894431ed77#12d0bdf10a85641dc2de3d6900c747894431ed77"
+dependencies = [
+ "nihav_core",
+]
+
+[[package]]
+name = "nihav_core"
+version = "0.1.0"
+source = "git+https://github.com/ruffle-rs/nihav-vp6?rev=12d0bdf10a85641dc2de3d6900c747894431ed77#12d0bdf10a85641dc2de3d6900c747894431ed77"
+
+[[package]]
+name = "nihav_duck"
+version = "0.1.0"
+source = "git+https://github.com/ruffle-rs/nihav-vp6?rev=12d0bdf10a85641dc2de3d6900c747894431ed77#12d0bdf10a85641dc2de3d6900c747894431ed77"
+dependencies = [
+ "nihav_codec_support",
+ "nihav_core",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2060,6 +2082,7 @@ dependencies = [
  "pollster",
  "ug2-audio",
  "ug2-formats",
+ "ug2-movie",
  "wgpu",
 ]
 
@@ -2068,6 +2091,19 @@ name = "ug2-formats"
 version = "0.1.0"
 dependencies = [
  "log",
+]
+
+[[package]]
+name = "ug2-movie"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "nihav_codec_support",
+ "nihav_core",
+ "nihav_duck",
+ "ug2-audio",
+ "ug2-formats",
 ]
 
 [[package]]

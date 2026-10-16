@@ -236,6 +236,8 @@ pub struct Mixer {
     road: LoopVoice,
     shots: Vec<Voice>,
     music: Option<Arc<Mutex<VecDeque<f32>>>>,
+    /// A movie's sound track; the music pauses while it plays.
+    movie: Option<Arc<Mutex<VecDeque<f32>>>>,
     pub music_volume: f32,
     pub sfx_volume: f32,
     rng: u32,
@@ -256,6 +258,7 @@ impl Default for Mixer {
             road: LoopVoice::default(),
             shots: Vec::new(),
             music: None,
+            movie: None,
             music_volume: 0.55,
             sfx_volume: 0.9,
             rng: 0x1234_5678,
@@ -288,6 +291,10 @@ impl Mixer {
 
     pub fn set_music(&mut self, ring: Arc<Mutex<VecDeque<f32>>>) {
         self.music = Some(ring);
+    }
+
+    pub fn set_movie(&mut self, ring: Option<Arc<Mutex<VecDeque<f32>>>>) {
+        self.movie = ring;
     }
 
     pub fn set_state(&mut self, s: SoundState) {
@@ -326,7 +333,8 @@ impl Mixer {
     /// Fills interleaved stereo frames.
     pub fn render(&mut self, out: &mut [f32]) {
         let s = self.state;
-        let mut music = self.music.as_ref().and_then(|m| m.lock().ok());
+        let mut movie = self.movie.as_ref().and_then(|m| m.lock().ok());
+        let mut music = if movie.is_some() { None } else { self.music.as_ref().and_then(|m| m.lock().ok()) };
         let mut rng = self.rng;
         for frame in out.chunks_exact_mut(2) {
             let mut fx = 0.0;
@@ -361,6 +369,12 @@ impl Mixer {
                 if m.len() >= 2 {
                     l += m.pop_front().unwrap_or(0.0) * self.music_volume;
                     r += m.pop_front().unwrap_or(0.0) * self.music_volume;
+                }
+            }
+            if let Some(m) = &mut movie {
+                if m.len() >= 2 {
+                    l += m.pop_front().unwrap_or(0.0);
+                    r += m.pop_front().unwrap_or(0.0);
                 }
             }
             frame[0] = soft_clip(l);

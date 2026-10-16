@@ -22,6 +22,7 @@ pub mod render;
 pub mod roads;
 pub mod traffic;
 pub mod vehicle;
+mod movie_view;
 pub mod visual;
 
 pub use ug2_audio::{music, sound};
@@ -176,6 +177,12 @@ pub struct Game {
     /// drivable sections the current draw and collision sets were made for.
     visibility: Option<Box<VisibleSections>>,
     env_maps: Option<Box<ug2_formats::envmap::EnvMaps>>,
+    /// The movie playing (FMV), drawn instead of the game, and the ones queued after it.
+    movie: Option<ug2_movie::Movie>,
+    movie_queue: std::collections::VecDeque<std::path::PathBuf>,
+    movie_view: movie_view::MovieView,
+    /// The original game files.
+    data_dir: std::path::PathBuf,
     visual: visual::VisualTreatment,
     /// Length of the last frame, seconds.
     frame_dt: f32,
@@ -261,6 +268,7 @@ impl Game {
         };
         let hud = Hud::new(cfg.steer_mode, cfg.hud_opacity);
         let sound = Sound::default();
+        let movie_view = movie_view::MovieView::new(&gpu.device, format);
         let music = GameDir::new(data_dir).resolve("pfdata/MusicSFx.mus").map(Music::start);
         if let Some(m) = &music {
             let ring = m.ring.clone();
@@ -294,6 +302,14 @@ impl Game {
             lights: Vec::new(),
             visibility: None,
             env_maps: None,
+            movie: None,
+            // As the PC game at start: the EA and THX logos, then the opening movie.
+            movie_queue: ["MOVIES/ealogo.vp6", "MOVIES/THX_logo.vp6", "MOVIES/FMVOpening.vp6"]
+                .iter()
+                .filter_map(|m| GameDir::new(data_dir).resolve(m))
+                .collect(),
+            movie_view,
+            data_dir: data_dir.to_path_buf(),
             visual: visual::VisualTreatment::default(),
             frame_dt: 1.0 / 60.0,
             vis_listed: Vec::new(),
@@ -382,6 +398,18 @@ impl Game {
     }
 
     pub fn handle_input(&mut self, ev: RawInput) {
+        if self.movie.is_some() {
+            // Any tap or key skips the movie, as Enter does on the PC.
+            let skip = match &ev {
+                RawInput::Touch { phase, .. } => *phase == TouchPhase::Down,
+                RawInput::Key { pressed, .. } | RawInput::PadButton { pressed, .. } => *pressed,
+                RawInput::PadAxis { .. } => false,
+            };
+            if skip {
+                self.end_movie();
+            }
+            return;
+        }
         if let RawInput::Touch { id, phase, x, y } = ev {
             if self.menu_visible() {
                 if phase == TouchPhase::Down {
@@ -683,7 +711,39 @@ impl Game {
     }
 
     /// Advances the simulation by `dt` seconds (real time, clamped).
+    /// Starts the next queued movie when none is playing; ends a finished one.
+    fn update_movies(&mut self) {
+        if self.movie.as_ref().is_some_and(|m| m.finished()) {
+            self.end_movie();
+        }
+        while self.movie.is_none() {
+            let Some(path) = self.movie_queue.pop_front() else { break };
+            match ug2_movie::Movie::open(&path) {
+                Ok(m) => {
+                    let ring = m.ring.clone();
+                    self.sound.with(|mx| mx.set_movie(Some(ring)));
+                    log::info!("movie {}", path.display());
+                    self.movie = Some(m);
+                }
+                Err(e) => log::warn!("movie {}: {e:#}", path.display()),
+            }
+        }
+    }
+
+    fn end_movie(&mut self) {
+        self.movie = None;
+        self.sound.with(|mx| mx.set_movie(None));
+    }
+
+    /// Queues a movie (`MOVIES/<name>.vp6`) to play now.
+    pub fn play_movie(&mut self, name: &str) {
+        if let Some(p) = GameDir::new(&self.data_dir).resolve(&format!("MOVIES/{name}.vp6")) {
+            self.movie_queue.push_back(p);
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
+        self.update_movies();
         let dt = dt.clamp(0.0, 0.1);
         if dt > 0.0 {
             self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
@@ -1324,7 +1384,12 @@ impl Game {
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let (w, h) = (config.width, config.height);
-        self.render_to(&view, w, h);
+        if let Some(m) = &mut self.movie {
+            let f = m.frame();
+            self.movie_view.draw(&self.gpu.device, &self.gpu.queue, &view, (w, h), f);
+        } else {
+            self.render_to(&view, w, h);
+        }
         frame.present();
     }
 

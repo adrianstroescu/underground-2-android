@@ -50,11 +50,14 @@ pub struct PtHeader {
 impl PtHeader {
     /// Parses the header at `o`; returns it and the offset just past the 0xFF end tag.
     pub fn parse(b: &[u8], o: usize) -> Result<(PtHeader, usize)> {
-        if slice(b, o, 2)? != b"PT" {
+        // Movie sound tracks use a "GSTR" variant: the tag, a u32, then the same tags.
+        let (mut h, mut p) = if slice(b, o, 4)? == b"GSTR" {
+            (PtHeader { platform: 0, tags: Vec::new() }, o + 8)
+        } else if slice(b, o, 2)? == b"PT" {
+            (PtHeader { platform: u16_at(b, o + 2)?, tags: Vec::new() }, o + 4)
+        } else {
             bail!("no PT header at {o:#x}");
-        }
-        let mut h = PtHeader { platform: u16_at(b, o + 2)?, tags: Vec::new() };
-        let mut p = o + 4;
+        };
         loop {
             let tag = u8_at(b, p)?;
             p += 1;
@@ -314,7 +317,7 @@ pub struct StreamHeader {
 }
 
 impl StreamHeader {
-    fn from_pt(h: &PtHeader) -> StreamHeader {
+    pub fn from_pt(h: &PtHeader) -> StreamHeader {
         StreamHeader { sample_rate: h.sample_rate(), channels: h.channels(), samples: h.samples(), codec: h.codec() }
     }
 }
@@ -423,6 +426,30 @@ pub fn decode_ea_xa_block(block: &[u8], channels: usize, out: &mut Vec<i16>) -> 
         let mut hist = (i16_at(block, p)? as i32, i16_at(block, p + 2)? as i32);
         let mut v = Vec::with_capacity(n);
         decode_ea_xa(block, p + 4, n, &mut hist, &mut v)?;
+        planes.push(v);
+    }
+    out.reserve(n * channels);
+    for i in 0..n {
+        for p in &planes {
+            out.push(p[i]);
+        }
+    }
+    Ok(())
+}
+
+/// Decodes one SCDl block of a movie sound track ("GSTR" header) to interleaved PCM:
+/// the sample count and per-channel offsets are big-endian and each channel starts
+/// straight with EA-XA v2 frames (no history pair).
+pub fn decode_ea_xa_block_be(block: &[u8], channels: usize, out: &mut Vec<i16>) -> Result<()> {
+    let be = |o: usize| -> Result<usize> { Ok(u32_at(block, o)?.swap_bytes() as usize) };
+    let n = be(8)?;
+    let base = 0x0C + 4 * channels;
+    let mut planes = Vec::with_capacity(channels);
+    for c in 0..channels {
+        let p = base + be(0x0C + 4 * c)?;
+        let mut hist = (0, 0);
+        let mut v = Vec::with_capacity(n);
+        decode_ea_xa(block, p, n, &mut hist, &mut v)?;
         planes.push(v);
     }
     out.reserve(n * channels);

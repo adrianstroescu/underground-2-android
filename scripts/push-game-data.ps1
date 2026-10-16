@@ -1,13 +1,14 @@
 # Copies the original game files from your PC install to the phone over adb.
 #   powershell -ExecutionPolicy Bypass -File scripts\push-game-data.ps1 -GameDir "D:\Games\NFSU2" [-Full]
-# Default copies what the current build uses (~1.6 GB: all cars, GLOBAL, Bayview and the
+# Default copies what the current build uses (~2.5 GB: the movies, all cars, GLOBAL, Bayview and the
 # drag, drift, Street X and URL tracks with their routes, sound and music); -Full also
 # copies FRONTEND, LANGUAGES and the unused regions. Files already on the phone are
 # skipped (--sync), so running it again after an update only sends what is new.
 # Set ANDROID_SERIAL when more than one device or emulator is attached.
 param(
     [string]$GameDir = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent),
-    [switch]$Full
+    [switch]$Full,
+    [switch]$NoMovies
 )
 $ErrorActionPreference = "Stop"
 $package = "com.adrianstroescu.ug2"
@@ -39,6 +40,8 @@ function Push($rel) {
 }
 
 foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata") { Push $d }
+# The movies (~0.9 GB): EA/THX logos, the opening and the story scenes.
+if (-not $NoMovies) { Push "MOVIES" }
 if ($Full) {
     foreach ($d in "TRACKS", "FRONTEND", "LANGUAGES") { Push $d }
 } else {
