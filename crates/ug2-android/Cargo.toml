@@ -15,4 +15,4 @@ log.workspace = true
 raw-window-handle.workspace = true
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
-ndk = { version = "0.9", features = ["audio", "api-level-28"] }
+ndk = { version = "0.9", features = ["audio", "nativewindow", "api-level-30"] }

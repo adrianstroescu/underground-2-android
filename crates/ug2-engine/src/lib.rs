@@ -868,6 +868,7 @@ impl Game {
             }
         }
         push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
+        self.renderer.post_settings.bloom_intensity = if self.cfg.bloom { 0.6 } else { 0.0 };
         let data = FrameData {
             view,
             fov_y: self.camera.fov_y,
@@ -877,6 +878,10 @@ impl Game {
             glow_texture: bin_hash("HEADLIGHTGLOW"),
             draw_distance: self.cfg.draw_distance,
             vertex_light_scale: self.cfg.vertex_light_scale,
+            // Mirror plane at the street under the player's car.
+            reflect_height: (self.cfg.reflections > 0.01 && self.spawned)
+                .then(|| self.vehicle.pos.z - self.vehicle.ride_height),
+            reflect_strength: self.cfg.reflections,
             hud: &self.canvas.vertices,
         };
         self.renderer.render(&self.gpu, target, width, height, &data);

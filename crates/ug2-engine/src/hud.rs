@@ -600,17 +600,16 @@ impl Hud {
         let d = dir(at(rpm));
         c.line(center - d * 6.0 * s, center + d * (r - 8.0 * s), 3.0 * s, [1.0, 0.35, 0.15, 1.0]);
         c.circle(center, 4.0 * s, [1.0, 0.35, 0.15, 1.0]);
-        let speed = format!("{}", t.speed_kmh.round().max(0.0) as i32);
-        c.text(center.x, center.y + 12.0 * s, 3.2 * s, 0.5, &speed, WHITE);
-        c.text(center.x, center.y + 37.0 * s, 1.2 * s, 0.5, "KM/H", [1.0, 1.0, 1.0, 0.75]);
+        // Gear above the hub, speed below it, inside the dial.
         let gear = match t.gear {
             -1 => "R".to_string(),
             0 => "N".to_string(),
             g => g.to_string(),
         };
-        let gx = center.x - r - 16.0 * s;
-        c.rect(gx - 11.0 * s, center.y + 10.0 * s, 22.0 * s, 28.0 * s, [0.0, 0.0, 0.0, 0.55]);
-        c.text(gx, center.y + 13.0 * s, 3.0 * s, 0.5, &gear, ACCENT);
+        c.text(center.x, center.y - 24.0 * s, 2.2 * s, 0.5, &gear, ACCENT);
+        let speed = format!("{}", t.speed_kmh.round().max(0.0) as i32);
+        c.text(center.x, center.y + 9.0 * s, 2.6 * s, 0.5, &speed, WHITE);
+        c.text(center.x, center.y + 30.0 * s, 1.1 * s, 0.5, "KM/H", [1.0, 1.0, 1.0, 0.75]);
     }
 
     /// Circular heading-up minimap, top left: roads, the race route, other racers.

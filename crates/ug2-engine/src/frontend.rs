@@ -15,6 +15,7 @@ use crate::{Game, PAINTS};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Title,
+    Options,
     Career,
     Garage,
     QuickRace,
@@ -52,6 +53,11 @@ pub struct PendingRace {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
+    Options,
+    Reflections,
+    Bloom,
+    Msaa,
+    ShowFps,
     Career,
     CareerRace,
     StartCareerRace,
@@ -96,7 +102,16 @@ impl Game {
 
     fn rows(&self) -> Vec<Row> {
         match self.screen {
-            Screen::Title => vec![Row::Career, Row::QuickRace, Row::FreeRoam, Row::Car, Row::Garage, Row::Traffic, Row::Steering],
+            Screen::Title => vec![Row::Career, Row::QuickRace, Row::FreeRoam, Row::Car, Row::Garage, Row::Options],
+            Screen::Options => vec![
+                Row::Reflections,
+                Row::Bloom,
+                Row::Msaa,
+                Row::ShowFps,
+                Row::Traffic,
+                Row::Steering,
+                Row::Back,
+            ],
             Screen::Career => vec![Row::CareerRace, Row::StartCareerRace, Row::Garage, Row::Back],
             Screen::Garage => {
                 let mut v = Vec::new();
@@ -260,6 +275,14 @@ impl Game {
                 }
                 Row::BackToCareer => MenuItem::button("BACK"),
                 Row::FreeRoam => MenuItem::button("FREE ROAM"),
+                Row::Options => MenuItem::button("OPTIONS"),
+                Row::Reflections => {
+                    let r = self.cfg.reflections;
+                    MenuItem::choice("ROAD REFLECTIONS", if r <= 0.01 { "OFF" } else if r < 0.45 { "LOW" } else { "HIGH" })
+                }
+                Row::Bloom => MenuItem::choice("BLOOM", on_off(self.cfg.bloom)),
+                Row::Msaa => MenuItem::choice("ANTI-ALIASING", if self.cfg.msaa > 1 { "4X (RESTART)" } else { "OFF (RESTART)" }),
+                Row::ShowFps => MenuItem::choice("SHOW FPS", on_off(self.cfg.show_fps)),
                 Row::QuickRace => {
                     MenuItem::button(if self.roads.is_some() { "QUICK RACE" } else { "QUICK RACE (LOADING)" })
                 }
@@ -303,6 +326,7 @@ impl Game {
         let cash = self.career.as_ref().map_or(0, |c| c.cash);
         let (title, subtitle) = match self.screen {
             Screen::Title => ("UNDERGROUND 2".to_string(), "BAYVIEW".to_string()),
+            Screen::Options => ("OPTIONS".to_string(), "GRAPHICS AND CONTROLS".to_string()),
             Screen::Career => {
                 let won = self.career.as_ref().map_or(0, |c| c.won.len());
                 ("CAREER".to_string(), format!("CASH ${cash}  |  RACES WON {won}/{}", ladder.len()))
@@ -342,6 +366,28 @@ impl Game {
         let Some(&row) = self.rows().get(i) else { return };
         let cycle = |at: usize, len: usize| (at as i32 + step).rem_euclid(len.max(1) as i32) as usize;
         match row {
+            Row::Options => {
+                self.screen = Screen::Options;
+                self.menu.selected = 0;
+            }
+            Row::Reflections => {
+                let levels = [0.0, 0.35, 0.55];
+                let at = levels.iter().position(|l| (l - self.cfg.reflections).abs() < 0.1).unwrap_or(2);
+                self.cfg.reflections = levels[cycle(at, levels.len())];
+                self.cfg.save(&self.config_path);
+            }
+            Row::Bloom => {
+                self.cfg.bloom = !self.cfg.bloom;
+                self.cfg.save(&self.config_path);
+            }
+            Row::Msaa => {
+                self.cfg.msaa = if self.cfg.msaa > 1 { 1 } else { 4 };
+                self.cfg.save(&self.config_path);
+            }
+            Row::ShowFps => {
+                self.cfg.show_fps = !self.cfg.show_fps;
+                self.cfg.save(&self.config_path);
+            }
             Row::Career if self.roads.is_some() => {
                 self.in_career = true;
                 let starter = self.player_car.clone().unwrap_or_else(|| "PEUGOT".into());
@@ -498,7 +544,7 @@ impl Game {
     pub(crate) fn back_pressed(&mut self) {
         match self.screen {
             Screen::Playing => self.set_paused(!self.paused),
-            Screen::QuickRace | Screen::Results | Screen::Career => {
+            Screen::QuickRace | Screen::Results | Screen::Career | Screen::Options => {
                 if self.screen == Screen::Results {
                     self.session.free_roam();
                 }

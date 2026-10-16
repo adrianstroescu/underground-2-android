@@ -7,8 +7,6 @@ use std::num::NonZeroU64;
 
 use bytemuck::{Pod, Zeroable};
 
-pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
@@ -48,6 +46,7 @@ struct Targets {
 }
 
 pub struct PostFx {
+    hdr_format: wgpu::TextureFormat,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     bright: wgpu::RenderPipeline,
@@ -59,7 +58,7 @@ pub struct PostFx {
 }
 
 impl PostFx {
-    pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, output_format: wgpu::TextureFormat, hdr_format: wgpu::TextureFormat) -> Self {
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post"),
             entries: &[
@@ -130,8 +129,9 @@ impl PostFx {
             })
         });
         Self {
-            bright: pipe("fs_bright", HDR_FORMAT),
-            blur: pipe("fs_blur", HDR_FORMAT),
+            bright: pipe("fs_bright", hdr_format),
+            blur: pipe("fs_blur", hdr_format),
+            hdr_format,
             composite: pipe("fs_composite", output_format),
             layout,
             sampler,
@@ -161,7 +161,7 @@ impl PostFx {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: HDR_FORMAT,
+                    format: self.hdr_format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 })
@@ -229,9 +229,24 @@ impl PostFx {
             p.set_bind_group(0, bg, &[]);
             p.draw(0..3, 0..1);
         };
-        pass(encoder, &t.bloom_a, &self.bright, &t.bright);
-        pass(encoder, &t.bloom_b, &self.blur, &t.blur_h);
-        pass(encoder, &t.bloom_a, &self.blur, &t.blur_v);
+        if s.bloom_intensity > 0.0 {
+            pass(encoder, &t.bloom_a, &self.bright, &t.bright);
+            pass(encoder, &t.bloom_b, &self.blur, &t.blur_h);
+            pass(encoder, &t.bloom_a, &self.blur, &t.blur_v);
+        } else {
+            // Keep the bloom target black so the composite adds nothing.
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("no bloom"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &t.bloom_a,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+        }
 
         let mut p = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite"),

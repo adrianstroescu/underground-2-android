@@ -57,6 +57,11 @@ fn android_main(app: AndroidApp) {
             match main {
                 MainEvent::InitWindow { .. } => {
                     let Some(w) = app.native_window() else { return };
+                    // Run at the display's top refresh rate (120 Hz on the S23) instead of
+                    // whatever the system picks for an unknown app.
+                    if let Err(e) = w.set_frame_rate(120.0, ndk::native_window::FrameRateCompatibility::Default) {
+                        log::warn!("set_frame_rate: {e}");
+                    }
                     let (width, height) = (w.width().max(1) as u32, w.height().max(1) as u32);
                     let handle = AndroidNdkWindowHandle::new(NonNull::new(w.ptr().as_ptr() as *mut c_void).unwrap());
                     let target = wgpu::SurfaceTargetUnsafe::RawHandle {

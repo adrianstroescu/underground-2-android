@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt;
 use crate::assets::{Blend, DrawRange, GpuVertex, MeshData, PreparedTexture, Role, PAINT};
 use crate::cars::CarModel;
 use crate::hud::HudVertex;
-use crate::post::{PostFx, PostSettings, HDR_FORMAT};
+use crate::post::{PostFx, PostSettings};
 
 pub struct Gpu {
     pub instance: wgpu::Instance,
@@ -19,6 +19,9 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub bc_textures: bool,
+    /// Format of the HDR scene targets: 32-bit RG11B10 float when it can be rendered to
+    /// with blending and 4x MSAA (half the bandwidth), else 64-bit RGBA16 float.
+    pub hdr_format: wgpu::TextureFormat,
 }
 
 impl Gpu {
@@ -35,6 +38,22 @@ impl Gpu {
         if bc_textures {
             features |= wgpu::Features::TEXTURE_COMPRESSION_BC;
         }
+        // wgpu only trusts the adapter's own format capabilities (MSAA resolve of
+        // RG11B10) with TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES.
+        let small_hdr = adapter.features().contains(
+            wgpu::Features::RG11B10UFLOAT_RENDERABLE | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+        ) && {
+            let f = adapter.get_texture_format_features(wgpu::TextureFormat::Rg11b10Ufloat);
+            f.allowed_usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+                && f.flags.contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
+                && f.flags.sample_count_supported(4)
+                && f.flags.contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE)
+        };
+        if small_hdr {
+            features |= wgpu::Features::RG11B10UFLOAT_RENDERABLE | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        }
+        let hdr_format = if small_hdr { wgpu::TextureFormat::Rg11b10Ufloat } else { wgpu::TextureFormat::Rgba16Float };
+        log::info!("HDR format {hdr_format:?}");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("ug2"),
             required_features: features,
@@ -43,7 +62,7 @@ impl Gpu {
             trace: wgpu::Trace::Off,
         }))?;
         device.on_uncaptured_error(Box::new(|e| log::error!("wgpu: {e}")));
-        Ok(Self { instance, adapter, device, queue, bc_textures })
+        Ok(Self { instance, adapter, device, queue, bc_textures, hdr_format })
     }
 
     pub fn surface_config(&self, surface: &wgpu::Surface<'_>, width: u32, height: u32) -> wgpu::SurfaceConfiguration {
@@ -72,6 +91,8 @@ struct Globals {
     fog: [f32; 4],
     light_dir: [f32; 4],
     ambient: [f32; 4],
+    screen: [f32; 4],
+    clip: [f32; 4],
 }
 
 #[repr(C)]
@@ -88,6 +109,7 @@ const MODE_WORLD: f32 = 0.0;
 const MODE_CAR: f32 = 1.0;
 const MODE_GLASS: f32 = 2.0;
 const MODE_UNLIT: f32 = 3.0;
+const MODE_ROAD: f32 = 4.0;
 
 const SLOT_STRIDE: u64 = 256;
 const SLOT_WORLD: u32 = 0;
@@ -95,7 +117,8 @@ const SLOT_WORLD_CUTOUT: u32 = 1;
 const SLOT_WORLD_BLEND: u32 = 2;
 const SLOT_SKY: u32 = 3;
 const SLOT_GLOW: u32 = 4;
-const WORLD_SLOTS: u32 = 5;
+const SLOT_ROAD: u32 = 5;
+const WORLD_SLOTS: u32 = 6;
 /// Uniform slots per drawn car, at `WORLD_SLOTS + index * CAR_SLOTS`.
 const CAR_SLOTS: u32 = 11;
 const CAR_BODY: u32 = 0;
@@ -148,6 +171,10 @@ pub struct FrameData<'a> {
     pub glow_texture: u32,
     pub draw_distance: f32,
     pub vertex_light_scale: f32,
+    /// Height of the street plane to mirror the city in; `None` disables reflections.
+    pub reflect_height: Option<f32>,
+    /// Road reflection strength, 0..1.
+    pub reflect_strength: f32,
     pub hud: &'a [HudVertex],
 }
 
@@ -156,6 +183,15 @@ pub struct Renderer {
     pub sample_count: u32,
     globals_buf: wgpu::Buffer,
     globals_bg: wgpu::BindGroup,
+    globals_layout: wgpu::BindGroupLayout,
+    /// Globals for the mirrored pass (its bind group uses a dummy reflection texture).
+    refl_globals_buf: wgpu::Buffer,
+    refl_globals_bg: wgpu::BindGroup,
+    refl_sampler: wgpu::Sampler,
+    reflection: Option<Reflection>,
+    pipe_refl_opaque: wgpu::RenderPipeline,
+    pipe_refl_sky: wgpu::RenderPipeline,
+    pipe_refl_add: wgpu::RenderPipeline,
     model_buf: wgpu::Buffer,
     model_bg: wgpu::BindGroup,
     model_layout: wgpu::BindGroupLayout,
@@ -184,6 +220,14 @@ pub struct Renderer {
     pub stats_draws: u32,
 }
 
+/// Half-resolution target the mirrored city is drawn into.
+struct Reflection {
+    width: u32,
+    height: u32,
+    color: wgpu::TextureView,
+    depth: wgpu::TextureView,
+}
+
 struct Targets {
     width: u32,
     height: u32,
@@ -198,7 +242,7 @@ impl Renderer {
     pub fn new(gpu: &Gpu, format: wgpu::TextureFormat, msaa: u32) -> Self {
         let device = &gpu.device;
         // The scene renders into an HDR target; the post pass writes `format`.
-        let scene_format = HDR_FORMAT;
+        let scene_format = gpu.hdr_format;
         let sample_count = if msaa > 1
             && gpu.adapter.get_texture_format_features(scene_format).flags.sample_count_supported(msaa)
             && gpu.adapter.get_texture_format_features(DEPTH).flags.sample_count_supported(msaa)
@@ -220,7 +264,25 @@ impl Renderer {
         };
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
-            entries: &[uniform_entry(0, false, std::mem::size_of::<Globals>() as u64)],
+            entries: &[
+                uniform_entry(0, false, std::mem::size_of::<Globals>() as u64),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
         let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model"),
@@ -254,11 +316,32 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buf.as_entire_binding() }],
+        let refl_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("reflection"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
+        let dummy_view = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("no reflection"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: scene_format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let globals_bg = globals_bind_group(device, &globals_layout, &globals_buf, &dummy_view, &refl_sampler);
+        let refl_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reflection globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let refl_globals_bg = globals_bind_group(device, &globals_layout, &refl_globals_buf, &dummy_view, &refl_sampler);
         let model_slots = WORLD_SLOTS + CAR_SLOTS * 8;
         let (model_buf, model_bg) = create_model_buffer(device, &model_layout, model_slots);
         let glow_capacity = 64 * 1024;
@@ -296,7 +379,7 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &attrs,
         };
-        let mesh_pipeline = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, depth_test: bool| {
+        let mesh_pipeline_n = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, depth_test: bool, samples: u32| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&mesh_layout),
@@ -318,7 +401,7 @@ impl Renderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: wgpu::MultisampleState { count: sample_count, mask: !0, alpha_to_coverage_enabled: false },
+                multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
                 fragment: Some(wgpu::FragmentState {
                     module: &mesh_shader,
                     entry_point: Some("fs_main"),
@@ -329,6 +412,9 @@ impl Renderer {
                 cache: None,
             })
         };
+        let mesh_pipeline = |label: &str, blend: Option<wgpu::BlendState>, depth_write: bool, depth_test: bool| {
+            mesh_pipeline_n(label, blend, depth_write, depth_test, sample_count)
+        };
         let pipe_opaque = mesh_pipeline("opaque", None, true, true);
         let pipe_blend = mesh_pipeline("blend", Some(wgpu::BlendState::ALPHA_BLENDING), false, true);
         let additive = wgpu::BlendComponent {
@@ -338,6 +424,10 @@ impl Renderer {
         };
         let pipe_add = mesh_pipeline("additive", Some(wgpu::BlendState { color: additive, alpha: additive }), false, true);
         let pipe_sky = mesh_pipeline("sky", Some(wgpu::BlendState::ALPHA_BLENDING), false, false);
+        // The mirrored pass renders single-sampled at half resolution.
+        let pipe_refl_opaque = mesh_pipeline_n("refl opaque", None, true, true, 1);
+        let pipe_refl_sky = mesh_pipeline_n("refl sky", Some(wgpu::BlendState::ALPHA_BLENDING), false, false, 1);
+        let pipe_refl_add = mesh_pipeline_n("refl additive", Some(wgpu::BlendState { color: additive, alpha: additive }), false, true, 1);
 
         // HUD
         let hud_layout_bg = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -417,6 +507,14 @@ impl Renderer {
             sample_count,
             globals_buf,
             globals_bg,
+            globals_layout,
+            refl_globals_buf,
+            refl_globals_bg,
+            refl_sampler,
+            reflection: None,
+            pipe_refl_opaque,
+            pipe_refl_sky,
+            pipe_refl_add,
             model_buf,
             model_bg,
             model_layout,
@@ -440,7 +538,7 @@ impl Renderer {
             sky: Vec::new(),
             car_models: Vec::new(),
             targets: None,
-            post: PostFx::new(device, format),
+            post: PostFx::new(device, format, scene_format),
             post_settings: PostSettings::default(),
             stats_draws: 0,
         }
@@ -518,14 +616,18 @@ impl Renderer {
                 .create_view(&wgpu::TextureViewDescriptor::default())
         };
         let depth = mk(DEPTH, self.sample_count, "depth");
-        let msaa = (self.sample_count > 1).then(|| mk(HDR_FORMAT, self.sample_count, "msaa"));
+        let msaa = (self.sample_count > 1).then(|| mk(gpu.hdr_format, self.sample_count, "msaa"));
         self.targets = Some(Targets { width, height, depth, msaa });
     }
 
-    fn write_uniforms(&mut self, gpu: &Gpu, f: &FrameData, aspect: f32) -> Mat4 {
+    /// Writes globals and model slots; returns the view-projection and, when reflections
+    /// are on, the mirrored view-projection.
+    fn write_uniforms(&mut self, gpu: &Gpu, f: &FrameData, width: u32, height: u32) -> (Mat4, Option<Mat4>) {
+        let aspect = width as f32 / height.max(1) as f32;
         let proj = Mat4::perspective_rh(f.fov_y, aspect, 0.3, 4000.0);
         let view_proj = proj * f.view;
         let light = Vec3::new(0.35, -0.45, 0.82).normalize();
+        let strength = if f.reflect_height.is_some() { f.reflect_strength } else { 0.0 };
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             cam_pos: f.cam_pos.extend(1.0).into(),
@@ -533,8 +635,26 @@ impl Renderer {
             fog: [f.draw_distance * 0.25, f.draw_distance, 0.92, 0.0],
             light_dir: light.extend(0.0).into(),
             ambient: [0.30, 0.33, 0.42, 1.0],
+            screen: [width as f32, height as f32, strength, 0.0],
+            clip: [0.0, 0.0, 0.0, 1.0],
         };
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        // Mirror the camera in the street plane z = h and clip what is below it.
+        let refl_view_proj = f.reflect_height.map(|h| {
+            let mirror = Mat4::from_translation(Vec3::Z * h)
+                * Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0))
+                * Mat4::from_translation(-Vec3::Z * h);
+            let vp = proj * f.view * mirror;
+            let cam = mirror.transform_point3(f.cam_pos);
+            let rg = Globals {
+                view_proj: vp.to_cols_array_2d(),
+                cam_pos: cam.extend(1.0).into(),
+                clip: [0.0, 0.0, 1.0, -(h - 0.05)],
+                ..globals
+            };
+            gpu.queue.write_buffer(&self.refl_globals_buf, 0, bytemuck::bytes_of(&rg));
+            vp
+        });
 
         let vs = f.vertex_light_scale;
         let slot = |model: Mat4, tint: [f32; 4], params: [f32; 4], emissive: [f32; 4]| ModelUniform {
@@ -554,6 +674,7 @@ impl Renderer {
         let sky_m = Mat4::from_translation(f.cam_pos - Vec3::Z * 60.0) * Mat4::from_scale(Vec3::splat(0.3));
         slots.push(slot(sky_m, one, [MODE_WORLD, 0.0, 0.0, vs], none));
         slots.push(slot(Mat4::IDENTITY, one, [MODE_WORLD, 0.0, 1.0, 1.0], none));
+        slots.push(slot(Mat4::IDENTITY, one, [MODE_ROAD, 0.0, 1.0, vs], none));
         for c in f.cars {
             let t = c.transform;
             let p = c.paint;
@@ -586,14 +707,44 @@ impl Renderer {
             bytes[o..o + std::mem::size_of::<ModelUniform>()].copy_from_slice(bytemuck::bytes_of(s));
         }
         gpu.queue.write_buffer(&self.model_buf, 0, &bytes);
-        view_proj
+        (view_proj, refl_view_proj)
+    }
+
+    /// Half-resolution reflection target; rebinds the main globals to sample it.
+    fn ensure_reflection(&mut self, gpu: &Gpu, width: u32, height: u32) {
+        // A third of the screen: blurred and seen at grazing angles, more is wasted.
+        let (w, h) = ((width / 3).max(1), (height / 3).max(1));
+        if self.reflection.as_ref().is_some_and(|r| r.width == w && r.height == h) {
+            return;
+        }
+        let mk = |format, usage, label| {
+            gpu.device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let color = mk(gpu.hdr_format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, "reflection");
+        let depth = mk(DEPTH, wgpu::TextureUsages::RENDER_ATTACHMENT, "reflection depth");
+        self.globals_bg = globals_bind_group(&gpu.device, &self.globals_layout, &self.globals_buf, &color, &self.refl_sampler);
+        self.reflection = Some(Reflection { width: w, height: h, color, depth });
     }
 
     /// Renders a frame into `target` (a swapchain image or an offscreen texture).
     pub fn render(&mut self, gpu: &Gpu, target: &wgpu::TextureView, width: u32, height: u32, f: &FrameData) {
         self.ensure_targets(gpu, width, height);
         self.post.ensure(&gpu.device, width, height);
-        let view_proj = self.write_uniforms(gpu, f, width as f32 / height.max(1) as f32);
+        if f.reflect_height.is_some() {
+            self.ensure_reflection(gpu, width, height);
+        }
+        let (view_proj, refl_view_proj) = self.write_uniforms(gpu, f, width, height);
         gpu.queue.write_buffer(&self.hud_buf, 0, bytemuck::cast_slice(&[width as f32, height as f32, 0.0, 0.0]));
 
         let hud_bytes: &[u8] = bytemuck::cast_slice(f.hud);
@@ -635,6 +786,75 @@ impl Renderer {
         let targets = self.targets.as_ref().unwrap();
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         let mut draws = 0u32;
+        // The city mirrored in the street, at half resolution and reduced range.
+        let car_list: Vec<(u32, &CarDraw, &CarGpu)> = f
+            .cars
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| Some((WORLD_SLOTS + i as u32 * CAR_SLOTS, c, self.car_models.get(c.model)?)))
+            .filter(|(_, c, _)| c.transform.w_axis.truncate().distance(f.cam_pos) < f.draw_distance)
+            .collect();
+        if let (Some(rvp), Some(refl)) = (refl_view_proj, &self.reflection) {
+            let rplanes = frustum_planes(&rvp);
+            let range = f.draw_distance.min(180.0);
+            let c = FOG_COLOR;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("reflection"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &refl.color,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &refl.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_bind_group(0, &self.refl_globals_bg, &[]);
+            pass.set_pipeline(&self.pipe_refl_sky);
+            for m in &self.sky {
+                draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend != Blend::Additive).then_some((SLOT_SKY, r.texture))
+                });
+            }
+            pass.set_pipeline(&self.pipe_refl_opaque);
+            let near: Vec<usize> = (0..self.sections.len())
+                .filter(|&i| {
+                    let m = &self.sections[i];
+                    aabb_distance(f.cam_pos, m.bbox_min, m.bbox_max) < range && aabb_in_frustum(&rplanes, m.bbox_min, m.bbox_max)
+                })
+                .collect();
+            for &i in &near {
+                // Opaque only: foliage and fences barely show in a blurred reflection.
+                draws += draw_ranges(&mut pass, &self.sections[i], &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Opaque).then_some((SLOT_WORLD, r.texture))
+                });
+            }
+            for &(base, c, g) in car_list.iter().filter(|(_, c, _)| c.transform.w_axis.truncate().distance(f.cam_pos) < 60.0) {
+                draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Opaque).then(|| car_slot(base, c, r))
+                });
+            }
+            pass.set_pipeline(&self.pipe_refl_add);
+            for &i in &near {
+                draws += draw_ranges(&mut pass, &self.sections[i], &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_BLEND, r.texture))
+                });
+            }
+            if !f.glows.is_empty() {
+                pass.set_bind_group(2, &self.model_bg, &[SLOT_GLOW * SLOT_STRIDE as u32]);
+                pass.set_bind_group(1, self.textures.get(&f.glow_texture).unwrap_or(&self.white), &[]);
+                pass.set_vertex_buffer(0, self.glow_vbuf.slice(..glow_bytes.len() as u64));
+                pass.draw(0..f.glows.len() as u32, 0..1);
+                draws += 1;
+            }
+        }
         {
             let scene = self.post.scene().expect("post targets");
             let (view, resolve) = match &targets.msaa {
@@ -674,20 +894,16 @@ impl Renderer {
             pass.set_pipeline(&self.pipe_opaque);
             for &i in &visible {
                 let m = &self.sections[i];
+                let road = if refl_view_proj.is_some() { SLOT_ROAD } else { SLOT_WORLD };
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| match r.blend {
+                    Blend::Opaque if r.role == Role::Road => Some((road, r.texture)),
                     Blend::Opaque => Some((SLOT_WORLD, r.texture)),
                     Blend::Cutout => Some((SLOT_WORLD_CUTOUT, r.texture)),
                     Blend::Blend | Blend::Additive => None,
                 });
             }
             // Cars: bodies and wheels.
-            let cars: Vec<(u32, &CarDraw, &CarGpu)> = f
-                .cars
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| Some((WORLD_SLOTS + i as u32 * CAR_SLOTS, c, self.car_models.get(c.model)?)))
-                .filter(|(_, c, _)| c.transform.w_axis.truncate().distance(f.cam_pos) < f.draw_distance)
-                .collect();
+            let cars = car_list.clone();
             for &(base, c, g) in &cars {
                 let solid = |r: &DrawRange| matches!(r.blend, Blend::Opaque | Blend::Cutout);
                 draws += draw_ranges(&mut pass, &g.body, &self.textures, &self.white, &self.model_bg, |r| {
@@ -826,8 +1042,26 @@ fn car_slot(base: u32, c: &CarDraw, r: &DrawRange) -> (u32, u32) {
         Role::Headlight => (base + CAR_HEAD, r.texture),
         Role::Brakelight => (base + CAR_BRAKE, r.texture),
         Role::Shadow => (base + CAR_SHADOW, r.texture),
-        Role::Normal => (base + CAR_BODY, r.texture),
+        Role::Normal | Role::Road => (base + CAR_BODY, r.texture),
     }
+}
+
+fn globals_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    buf: &wgpu::Buffer,
+    reflection: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("globals"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(reflection) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
 }
 
 fn create_model_buffer(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, slots: u32) -> (wgpu::Buffer, wgpu::BindGroup) {

@@ -53,6 +53,8 @@ pub enum Role {
     Headlight,
     Brakelight,
     Shadow,
+    /// Street surface: reflects the city (planar reflection).
+    Road,
 }
 
 /// Texture hash used for car paint (groups whose texture is supplied by a shader).
@@ -411,9 +413,14 @@ fn build_section_mesh(
     let mut vertices = Vec::new();
     let mut buckets = HashMap::new();
     let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-    let texture_of = |h: u32| (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal);
     for inst in &sc.instances {
         let Some(solid) = instance_solid(sc, inst, solids) else { continue };
+        // Street surfaces get the reflective road role (opaque groups only).
+        let road = sc.infos.get(inst.info as usize).is_some_and(|i| i.name.contains("ROAD"));
+        let texture_of = |h: u32| {
+            let b = blend_of.get(&h).copied().unwrap_or(Blend::Opaque);
+            (h, b, if road && b == Blend::Opaque { Role::Road } else { Role::Normal })
+        };
         let m = Mat4::from_cols_array(&inst.matrix());
         append_solid(solid, &m, &mut vertices, &mut buckets, &texture_of, &mut bbox);
     }

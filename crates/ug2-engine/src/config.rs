@@ -29,6 +29,10 @@ pub struct GameConfig {
     /// Multiplier for baked track vertex lighting.
     pub vertex_light_scale: f32,
     pub traffic: bool,
+    /// Road reflection strength 0..1 (0 turns the extra pass off).
+    pub reflections: f32,
+    /// Glow around bright lights (post-processing).
+    pub bloom: bool,
     /// Visual parts per car.
     pub parts: HashMap<String, PartSet>,
 }
@@ -48,6 +52,8 @@ impl Default for GameConfig {
             draw_distance: 650.0,
             vertex_light_scale: 2.0,
             traffic: true,
+            reflections: 0.55,
+            bloom: true,
             parts: HashMap::new(),
         }
     }
@@ -107,6 +113,8 @@ impl GameConfig {
                 "draw_distance" => self.draw_distance = f().unwrap_or(self.draw_distance).clamp(100.0, 3000.0),
                 "vertex_light_scale" => self.vertex_light_scale = f().unwrap_or(self.vertex_light_scale),
                 "version" => {}
+                "reflections" => self.reflections = f().unwrap_or(self.reflections).clamp(0.0, 1.0),
+                "bloom" => self.bloom = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on"),
                 _ if k.starts_with("parts.") => {
                     let n: Vec<u16> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                     if n.len() >= 4 {
@@ -159,7 +167,9 @@ impl GameConfig {
              render_scale = {}\n\
              draw_distance = {}\n\
              vertex_light_scale = {}\n\
-             traffic = {}\n{}",
+             traffic = {}\n\
+             reflections = {}   # road reflections 0..1, 0 = off\n\
+             bloom = {}\n{}",
             self.car,
             self.location,
             self.paint[0],
@@ -174,6 +184,8 @@ impl GameConfig {
             self.draw_distance,
             self.vertex_light_scale,
             self.traffic as u8,
+            self.reflections,
+            self.bloom as u8,
             parts,
         )
     }

@@ -8,6 +8,10 @@ struct Globals {
     fog: vec4<f32>,
     light_dir: vec4<f32>,
     ambient: vec4<f32>,
+    // x, y = target size in pixels, z = road reflection strength
+    screen: vec4<f32>,
+    // Fragments with dot(world, xyz) + w < 0 are clipped (the reflection pass).
+    clip: vec4<f32>,
 };
 
 struct Model {
@@ -21,6 +25,8 @@ struct Model {
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
+@group(0) @binding(1) var refl_tex: texture_2d<f32>;
+@group(0) @binding(2) var refl_samp: sampler;
 @group(1) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(1) @binding(1) var s_diffuse: sampler;
 @group(2) @binding(0) var<uniform> m: Model;
@@ -57,7 +63,23 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSample(t_diffuse, s_diffuse, i.uv);
     var rgb: vec3<f32>;
     var a = tex.a * m.tint.a;
-    if (m.params.x > 2.5) {
+    if (m.params.x > 3.5) {
+        // Street: baked lighting plus the mirrored city, softened with 4 taps and
+        // stronger at grazing angles.
+        rgb = tex.rgb * m.tint.rgb * i.color.rgb * m.params.w;
+        a = a * i.color.a;
+        let uv = i.clip.xy / g.screen.xy;
+        let o = vec2<f32>(1.5, 1.5) / g.screen.xy;
+        var r = textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(o.x, o.y), 0.0).rgb;
+        r += textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(-o.x, o.y), 0.0).rgb;
+        r += textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(o.x, -o.y), 0.0).rgb;
+        r += textureSampleLevel(refl_tex, refl_samp, uv + vec2<f32>(-o.x, -o.y), 0.0).rgb;
+        r *= 0.25;
+        let v = normalize(g.cam_pos.xyz - i.world);
+        let fres = 0.2 + 0.8 * pow(1.0 - clamp(v.z, 0.0, 1.0), 4.0);
+        let k = fres * g.screen.z;
+        rgb = rgb * (1.0 - 0.3 * k) + r * k;
+    } else if (m.params.x > 2.5) {
         // Unlit (shadows, decals).
         rgb = tex.rgb * m.tint.rgb;
     } else if (m.params.x > 0.5) {
@@ -92,7 +114,7 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         rgb = tex.rgb * m.tint.rgb * i.color.rgb * m.params.w;
         a = a * i.color.a;
     }
-    if (a < m.params.y) {
+    if (a < m.params.y || dot(i.world, g.clip.xyz) + g.clip.w < 0.0) {
         discard;
     }
     if (m.params.z > 0.5) {
