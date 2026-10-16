@@ -79,6 +79,45 @@ impl CollisionWorld {
         self.sections_on = on;
     }
 
+    fn group_on(&self, t: &Tri) -> bool {
+        t.group == 0 || self.groups_on.get(t.group as usize).copied().unwrap_or(false)
+    }
+
+    /// Whether a car driving straight from `a` to `b` (points on the road) would hit a
+    /// wall of the switched-on groups, in any section.
+    pub fn wall_between(&self, a: Vec3, b: Vec3) -> bool {
+        let (a2, b2) = (Vec2::new(a.x, a.y), Vec2::new(b.x, b.y));
+        let mut seen: Vec<u32> = Vec::new();
+        let steps = ((b2 - a2).length() / (self.cell * 0.5)).ceil().max(1.0) as usize;
+        for k in 0..=steps {
+            let p = a2.lerp(b2, k as f32 / steps as f32);
+            for &i in self.cell_tris(p.x, p.y) {
+                if seen.contains(&i) {
+                    continue;
+                }
+                seen.push(i);
+                let t = &self.tris[i as usize];
+                if !t.wall || !self.group_on(t) {
+                    continue;
+                }
+                // A wall is upright: its footprint is the longest edge seen from above.
+                let pts = [Vec2::new(t.a.x, t.a.y), Vec2::new(t.b.x, t.b.y), Vec2::new(t.c.x, t.c.y)];
+                let (c, d) = [(0, 1), (1, 2), (0, 2)]
+                    .into_iter()
+                    .map(|(i, j)| (pts[i], pts[j]))
+                    .max_by(|x, y| x.0.distance_squared(x.1).total_cmp(&y.0.distance_squared(y.1)))
+                    .unwrap();
+                let Some(s) = segment_cross(a2, b2, c, d) else { continue };
+                let z = a.z + (b.z - a.z) * s + 0.6;
+                let (zmin, zmax) = (t.a.z.min(t.b.z).min(t.c.z), t.a.z.max(t.b.z).max(t.c.z));
+                if z >= zmin && z <= zmax {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn active(&self, t: &Tri) -> bool {
         (t.group == 0 || self.groups_on.get(t.group as usize).copied().unwrap_or(false))
             && self.sections_on.get(t.section as usize).copied().unwrap_or(true)
@@ -165,6 +204,18 @@ impl CollisionWorld {
             }
         }
     }
+}
+
+/// Where segment a-b crosses segment c-d, as a fraction of a-b.
+fn segment_cross(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<f32> {
+    let (r, s) = (b - a, d - c);
+    let den = r.perp_dot(s);
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let t = (c - a).perp_dot(s) / den;
+    let u = (c - a).perp_dot(r) / den;
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some(t)
 }
 
 fn height_on(t: &Tri, p: Vec2) -> Option<f32> {

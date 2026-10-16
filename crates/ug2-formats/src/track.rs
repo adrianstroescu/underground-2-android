@@ -52,6 +52,7 @@ pub struct SectionData {
     pub textures: Vec<TexturePack>,
     pub scenery: Vec<ScenerySection>,
     pub lights: Vec<WorldLight>,
+    pub collision: Vec<crate::collision::CollisionSection>,
 }
 
 /// Parses every chunk in `stream[start..start+len]`. Offsets stay absolute so that
@@ -74,6 +75,7 @@ pub fn parse_region(stream: &[u8], start: usize, len: usize) -> SectionData {
                 Ok(s) => out.scenery.push(s),
                 Err(e) => log::warn!("scenery at {:#x}: {e}", c.offset),
             },
+            crate::collision::TRACK_COLLISION => out.collision.extend(crate::collision::parse_collision(&c)),
             LIGHT_PACK => match parse_light_pack(&c) {
                 Ok(l) => out.lights.extend(l),
                 Err(e) => log::warn!("lights at {:#x}: {e}", c.offset),

@@ -86,6 +86,105 @@ pub struct RaceLine {
 }
 
 impl RaceLine {
+    /// The route data cuts corners and gores a little; with the game's walls in place a
+    /// car following it exactly would hit them. Around each stretch that runs through a
+    /// wall, picks for every point a sideways shift (up to 9 m, kept on the ground) so
+    /// that no stretch crosses a wall, staying as close to the original as possible.
+    /// Returns how many points moved.
+    pub fn avoid_walls(&mut self, world: &crate::collision::CollisionWorld) -> usize {
+        let n = self.points.len();
+        if n < 3 {
+            return 0;
+        }
+        let circuit = self.circuit;
+        let segments = if circuit { n } else { n - 1 };
+        let at = |i: isize| -> Option<usize> {
+            if circuit {
+                Some(i.rem_euclid(n as isize) as usize)
+            } else {
+                (0..n as isize).contains(&i).then_some(i as usize)
+            }
+        };
+        let normals: Vec<Vec3> = (0..n as isize)
+            .map(|i| {
+                let a = self.points[at(i - 1).unwrap_or(i as usize)];
+                let b = self.points[at(i + 1).unwrap_or(i as usize)];
+                let d = (b - a).truncate().normalize_or_zero();
+                Vec3::new(-d.y, d.x, 0.0)
+            })
+            .collect();
+        let on_ground = |p: Vec3| world.ground(p + Vec3::Z * 2.0, 1.0, 5.0).map(|(z, _)| Vec3::new(p.x, p.y, z));
+        let shifts: Vec<f32> = (-12..=12).map(|k| k as f32 * 0.75).collect();
+        let mut pts = self.points.clone();
+        let mut moved = std::collections::HashSet::new();
+        let mut i = 0;
+        while i < segments {
+            let j = at(i as isize + 1).unwrap();
+            if !world.wall_between(pts[i], pts[j]) {
+                i += 1;
+                continue;
+            }
+            // Widen the window until a clear path exists (both ends stay put).
+            let mut done = false;
+            for reach in [6isize, 12, 24, 40] {
+                let (lo, hi) = (i as isize - reach, i as isize + 1 + reach);
+                let idx: Vec<usize> = (lo..=hi).filter_map(at).collect();
+                if idx.len() != (hi - lo + 1) as usize || (circuit && idx.len() >= n) {
+                    continue;
+                }
+                let m = idx.len();
+                // Candidate positions per point; the ends only keep their own.
+                let cand: Vec<Vec<(f32, Vec3)>> = idx
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &p)| {
+                        if k == 0 || k == m - 1 {
+                            vec![(0.0, pts[p])]
+                        } else {
+                            shifts.iter().filter_map(|&s| Some((s, on_ground(pts[p] + normals[p] * s)?))).collect()
+                        }
+                    })
+                    .collect();
+                let mut cost: Vec<Vec<f32>> = cand.iter().map(|c| vec![f32::INFINITY; c.len()]).collect();
+                let mut from: Vec<Vec<usize>> = cand.iter().map(|c| vec![0; c.len()]).collect();
+                cost[0][0] = 0.0;
+                for k in 1..m {
+                    for (b, &(sb, pb)) in cand[k].iter().enumerate() {
+                        for (a, &(sa, pa)) in cand[k - 1].iter().enumerate() {
+                            let c = cost[k - 1][a];
+                            if !c.is_finite() {
+                                continue;
+                            }
+                            let total = c + sb.abs() + (sb - sa).abs() * 0.5;
+                            if total < cost[k][b] && !world.wall_between(pa, pb) {
+                                cost[k][b] = total;
+                                from[k][b] = a;
+                            }
+                        }
+                    }
+                }
+                if !cost[m - 1][0].is_finite() {
+                    continue;
+                }
+                let mut b = 0;
+                for k in (1..m).rev() {
+                    let (s, p) = cand[k][b];
+                    if s != 0.0 {
+                        pts[idx[k]] = p;
+                        moved.insert(idx[k]);
+                    }
+                    b = from[k][b];
+                }
+                done = true;
+                break;
+            }
+            // Past the fixed window, or nothing clear within reach: move on.
+            i += if done { 1 } else { 1 };
+        }
+        self.points = pts;
+        moved.len()
+    }
+
     /// Index of the point nearest to `p`, searching around `hint` first.
     pub fn locate(&self, p: Vec3, hint: Option<usize>) -> usize {
         let n = self.points.len();

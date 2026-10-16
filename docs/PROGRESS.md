@@ -1,6 +1,8 @@
 # Progress and next steps
 
-Where the port stands, so work can pick up from here. Last updated 2026-10-16.
+Where the port stands, so work can pick up from here. Last updated 2026-10-16
+(evening). What we know about the original game's data and shaders is in
+`../CLAUDE.md`.
 
 ## Working (tested on the S23 Ultra, 120 Hz)
 
@@ -12,53 +14,79 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16.
 - Career: race ladder, prizes, car shop and upgrades (`career.cfg`).
 - Engine, effects and music audio.
 - **All race modes**, chosen in QUICK RACE > MODE or in the career ladder:
-  - Circuit and Sprint (Bayview, L4RA);
+  - Circuit and Sprint (L4RA);
   - Drag (L4RB, L4RD);
   - Drift (L4RC);
   - Street X (L4RF);
   - URL (L4RG).
-- The game loads a race's region when it starts (`LoadRequest::World`). Choosing FREE ROAM goes back to Bayview.
-- Scenery groups (chunks `0x34107` and `0x34108`): each race switches on only its own `BARRIERS_<track>` and `PLAYER_BARRIERS_<track>`. Free roam switches on `FREE_ROAM` (the shop light beams). Instances with flag `0x10` are group-controlled.
-  - Before this fix, the drift lot showed the barriers of all 11 layouts at once, so the race route was blocked.
-- Drift: points for sliding, a multiplier up to x5, and a crash loses the current slide. Rivals are target scores (`drift.rs`). Grip is looser in drift events.
-- Drag:
-  - manual gearbox with SHIFT +/- buttons and a shift light on the gauge;
-  - PERFECT SHIFT gives a short boost;
-  - the engine blows after about 3 s on the limiter;
-  - the car holds its lane, and pressing left or right changes lane.
-
-## Tested in this last session
-
-- The quick race menu with MODE, the switch to L4RC, and a drift race with the HUD (score, rival standings, laps) at 120 FPS.
-- With the barrier groups on, the drift lap goes all the way round.
+- **Visible sections as in the original** (`0x80034150`): only the sections listed for
+  the camera's drivable section are drawn, which doubled the FPS on the drag map.
+  Lights follow them, and collision keeps every section seen from any car.
+- **Original road shader**: streets are opaque, and the texture alpha sets how much
+  of the mirrored city they show.
+- **Original texture blend types**:
+  - type 0 is opaque (asphalt, concrete, bridge decks were drawn see-through before);
+  - type 1 is alpha blended (glass, fences, shadows);
+  - type 2 is additive (neon, lights, car light lenses).
+- **Original track collision** (`0x80034130`): road, kerbs, barriers and map-edge
+  walls. Each race's barriers (`BARRIERS_<track>`) switch on only during that race.
+  Render meshes are no longer used for collision.
+- Race lines are moved off walls when a race starts (`RaceLine::avoid_walls`), so the
+  AI and autopilot don't hit gore walls.
+- Drag race tested end to end: CITY DRAG, 1st in 0:38.
+- Cars stop past the finish line instead of reversing.
+- Drift race on L4RC: the lap completes and scores, and the lot no longer shows white
+  patches.
 
 ## Not tested on the phone yet
 
-- A **drag** race: the SHIFT buttons, lane changes and the blown engine.
-- **Street X** and **URL** races, and drag on L4RD.
-- Bayview races with the new barriers (`XO_TrackBarrier*` now block cars during that race).
-- Hand-driven drift tuning: how easy it is to score, and whether rival scores (`rival_scores`) need adjusting.
-- Career moving between regions; the ladder now mixes all modes, ordered by prize.
+- Street X and URL races, and drag on L4RD.
+- Hand-driven drift tuning: the autopilot scores only ~10 points per lap against
+  rivals at 5–9k, so check `rival_scores` against real driving.
+- Career moving between regions.
 
 ## Known issues and to-do
 
-1. A white patch on the floor of the drift lot, probably `TRN_SI_DriftMarker*` without its texture.
-2. The aftermarket rims on a Peugeot 106 with a widebody may not be visible. Check a side view of the wheels.
-3. Start/finish graphics (flags `0x4` and `0x8`, `43xx_StartFinGraphic`) are always hidden. They could be shown for their own race.
-4. `add_car_model` never frees older models, so memory grows with every garage change.
-5. Remaining roadmap:
+1. About 14 places in Bayview where a race's route data jumps between two roads
+   through the air (e.g. the V junction in a tunnel at (362, 268)). The AI can get
+   stuck there.
+   - The autopilot resets after 3 s.
+   - Fix: build race lines with collision-aware route chaining, so a jump through a
+     wall is not allowed (`route.rs::race_line`).
+2. Car shading is still a guess. The original CAR effect uses:
+   - spherical-harmonics lighting;
+   - per-material DiffuseMin/Range, Specular and Envmap values from GLOBALB `0x135200`
+     (layout not decoded yet);
+   - a reflection envmap.
+   See `CLAUDE.md`.
+3. Other original effects not re-implemented yet:
+   - SKYMORPH;
+   - OVERBRIGHT bloom parameters;
+   - SCREENFILTER;
+   - WORLDHEADLIGHT (headlight projection; ours is a glow pool that looks too bright);
+   - fog values;
+   - HORIZON_FOG;
+   - DEPTH_OF_FIELD.
+4. Start/finish graphics (instance flags `0x4`/`0x8`) are always hidden. They could be
+   shown for their own race.
+5. `add_car_model` never frees older models.
+6. The surface types in the collision (byte 2) are not used yet: grip, sound and
+   sparks per surface.
+7. Remaining roadmap:
    - vinyls and decals;
    - car cube-map reflections;
-   - fog and `PAN_*` panoramas;
+   - `PAN_*` panoramas;
    - rear-view mirror;
    - AI engine sounds;
    - TRACKMAP minimap textures;
-   - gamepad menus;
-   - README.
+   - gamepad menus.
 
 ## Testing aids
 
-- `autopilot = 1` in `ug2.cfg` lets the computer drive the player's car in races, including shifting in drags. Remove it to play normally.
-- Every second, `car pos ... | wall <object>` in logcat names the object the car is touching.
-- `scripts/push-game-data.ps1` now also copies L4RB, L4RC, L4RD, L4RF and L4RG.
-- Desktop and `ug2-engine` tests crash on this PC before `main` (MinGW + wgpu, `0xC0000005`). Test the data logic in a separate crate without wgpu, or on the phone.
+- `autopilot = 1` in `ug2.cfg` lets the computer drive the player's car in races. Remove
+  it to play normally. See the `phone-test` skill.
+- Every second, `car pos ... | wall <object>` in logcat names what the car touches.
+  For track collision the name is `TRACK_<section>_SURFACE_<xx>` or
+  `TRACK_<section>_<barrier set>`.
+- Desktop and `ug2-engine` tests crash on this PC before `main` (MinGW + wgpu). Use a
+  scratch crate (see the `ug2-reverse` skill) or the phone.

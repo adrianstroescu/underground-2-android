@@ -14,6 +14,7 @@ use ug2_formats::scenery::{SceneryGroups, SceneryInstance, ScenerySection, GROUP
 use ug2_formats::solid::Solid;
 use ug2_formats::tpk::{find_tpks, AlphaUsage, TexFormat, Texture};
 use ug2_formats::track::{parse_region, parse_streaming_sections};
+use ug2_formats::collision::CollisionSection;
 use ug2_formats::visible::VisibleSections;
 
 use crate::cars::{load_car, CarModel, SharedCarData};
@@ -268,7 +269,7 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
         sets.insert(key, id);
     }
     log::info!("{region}: {} scenery groups in {} sets", groups.groups.len(), set_names.len() - 1);
-    send(LoadEvent::Groups(set_names));
+    let barrier_names = ug2_formats::collision::barrier_names(&index);
     send(LoadEvent::Visibility(VisibleSections::parse(&index).map(Box::new)));
 
     send(LoadEvent::Progress("PARSING TRACK".into()));
@@ -276,6 +277,7 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
     let mut textures: Vec<Texture> = Vec::new();
     let mut scenery: Vec<ScenerySection> = Vec::new();
     let mut lights = Vec::new();
+    let mut track_collision = Vec::new();
     for s in &sections {
         if s.offset + s.size > stream.len() {
             continue;
@@ -291,6 +293,7 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
         }
         scenery.extend(d.scenery);
         lights.extend(d.lights.into_iter().map(|l| (s.number as u16, l)));
+        track_collision.extend(d.collision);
     }
     drop(stream);
     // Shared world textures (street furniture, cranes, ships...) live outside the stream.
@@ -314,7 +317,9 @@ fn load_world(game: &GameDir, region: &str, bc_textures: bool, tx: &Sender<LoadE
     }
 
     send(LoadEvent::Progress("BUILDING COLLISION".into()));
-    let (collision, spawn) = build_collision(&scenery, &solids, &sets);
+    let (collision, spawn) = build_collision(&scenery, &solids, &sets, &track_collision, &barrier_names, &mut set_names);
+    drop(track_collision);
+    send(LoadEvent::Groups(set_names));
     send(LoadEvent::Collision(collision));
     log::info!("{} world lights", lights.len());
     send(LoadEvent::Lights(lights));
@@ -536,12 +541,47 @@ fn build_sky_mesh(sc: &ScenerySection, solids: &HashMap<u32, Arc<Solid>>, blend_
     finish_mesh(vertices, buckets, bbox)
 }
 
+/// The game's own track collision when the region has it (every shipped one does),
+/// with each race's barrier polygons in a group set of their own. Without it, terrain
+/// meshes, wall-like buildings and group-switched barriers stand in.
 fn build_collision(
     scenery: &[ScenerySection],
     solids: &HashMap<u32, Arc<Solid>>,
     sets: &GroupSets,
+    track: &[CollisionSection],
+    barrier_names: &[String],
+    set_names: &mut Vec<Vec<String>>,
 ) -> (CollisionWorld, Option<(Vec3, f32)>) {
     let mut world = CollisionWorld::new(8.0);
+    let original = track.iter().any(|t| !t.polygons.is_empty());
+    // A race's barrier polygons belong to a group set named after it, so the race
+    // switches them on with its scenery barriers.
+    let mut barrier_set = |b: u8| -> u16 {
+        let Some(name) = barrier_names.get(b as usize).filter(|_| b != 0) else { return 0 };
+        let wanted = vec![name.clone()];
+        let at = set_names.iter().position(|n| *n == wanted).unwrap_or_else(|| {
+            set_names.push(wanted);
+            set_names.len() - 1
+        });
+        at as u16
+    };
+    for t in track {
+        let mut owner = None;
+        for p in &t.polygons {
+            if owner != Some((p.surface, p.barrier)) {
+                let set = barrier_set(p.barrier);
+                let name = match barrier_names.get(p.barrier as usize).filter(|_| p.barrier != 0) {
+                    Some(b) => format!("TRACK_{}_{b}", t.section),
+                    None => format!("TRACK_{}_SURFACE_{:02X}", t.section, p.surface),
+                };
+                world.begin_owner(&name, set, t.section as u16);
+                owner = Some((p.surface, p.barrier));
+            }
+            for [a, b, c] in p.triangles() {
+                world.add(Vec3::from(a), Vec3::from(b), Vec3::from(c), true);
+            }
+        }
+    }
     // Spawn on an open-air road piece near the middle of the map.
     let target = Vec3::new(-500.0, 300.0, 0.0);
     let mut candidates: Vec<(f32, Vec3, f32)> = Vec::new();
@@ -554,18 +594,19 @@ fn build_collision(
             let Some(solid) = instance_solid(sc, inst, solids) else { continue };
             let name = &sc.infos[inst.info as usize].name;
             let terrain = name.starts_with("TRN");
-            // Race barriers switched on by a scenery group block cars whatever their prefix
-            // (Bayview's are XO_ props).
-            let wall_only = name.starts_with("XB") || name.starts_with("XW") || (set != 0 && name.contains("Barrier"));
-            if !terrain && !wall_only {
-                continue;
-            }
+            let wall_like = name.starts_with("XB") || name.starts_with("XW");
+            // Without the track collision, race barriers switched on by a scenery group
+            // block cars whatever their prefix (Bayview's are XO_ props).
+            let barrier = set != 0 && (wall_like || name.contains("Barrier"));
+            let collide = !original && (terrain || wall_like || barrier);
             let Some(mesh) = &solid.mesh else { continue };
             let m = Mat4::from_cols_array(&inst.matrix());
             let pts: Vec<Vec3> = mesh.vertices.iter().map(|v| m.transform_point3(Vec3::from(v.pos))).collect();
-            world.begin_owner(&solid.name, set, sc.number as u16);
-            for t in mesh.indices.chunks_exact(3) {
-                world.add(pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize], terrain);
+            if collide {
+                world.begin_owner(&solid.name, set, sc.number as u16);
+                for t in mesh.indices.chunks_exact(3) {
+                    world.add(pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize], terrain);
+                }
             }
             let is_road = name.contains("ROAD") || solid.name.contains("ROAD");
             if terrain && is_road && set == 0 && !pts.is_empty() {

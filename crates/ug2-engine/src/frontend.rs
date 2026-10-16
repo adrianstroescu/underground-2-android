@@ -743,6 +743,16 @@ impl Game {
         log::info!("race {} ({} {:?}): {} laps, {} opponents", def.info.track, def.info.name, def.info.mode, p.laps, opps.len());
         let length = def.line.length;
         self.session.start_race(def, p.laps, &mut self.vehicle, &opps);
+        // With this race's barriers switched on, steer its line clear of the walls.
+        self.update_groups();
+        if let (Some(w), Some(r)) = (&mut self.world, self.session.race_mut()) {
+            // Every section's walls count, not just those near the grid.
+            w.set_sections_on(Vec::new());
+            self.vis_cars.clear();
+            let t = std::time::Instant::now();
+            let moved = r.def.line.avoid_walls(w);
+            log::info!("race line: {moved} points moved off walls in {:.1?}", t.elapsed());
+        }
         if drift {
             let scores = rival_scores(length, p.laps, strength.unwrap_or(0.4));
             let rivals = p.opponents.iter().zip(scores).map(|((n, _), s)| (display_name(n).to_string(), s)).collect();
