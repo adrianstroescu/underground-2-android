@@ -11,10 +11,10 @@ use crate::Result;
 pub struct TyreData {
     /// Largest slip angle that still grips (rad).
     pub max_static_slip: f32,
-    /// Brake torque scale (× 4 × brake input).
-    pub brake: f32,
-    /// Handbrake torque scale (× 10 × handbrake input).
-    pub handbrake: f32,
+    /// Lateral force curve parameters (+4, +8; see docs/re/physics2_re.md). Brakes are
+    /// record 0x384 / 0x388 / 0x38C, not these.
+    pub lateral_a: f32,
+    pub lateral_b: f32,
     /// Static and sliding friction.
     pub static_grip: f32,
     pub dynamic_grip: f32,
@@ -69,7 +69,7 @@ impl CarPhysics {
     pub fn parse(rec: &[u8]) -> Result<Self> {
         let f = |o: usize| f32_at(rec, o);
         let tyre = |o: usize| -> Result<TyreData> {
-            Ok(TyreData { max_static_slip: f(o)?, brake: f(o + 4)?, handbrake: f(o + 8)?, static_grip: f(o + 0xC)?, dynamic_grip: f(o + 0x10)? })
+            Ok(TyreData { max_static_slip: f(o)?, lateral_a: f(o + 4)?, lateral_b: f(o + 8)?, static_grip: f(o + 0xC)?, dynamic_grip: f(o + 0x10)? })
         };
         let gear_count = u32_at(rec, 0x2D8)?.min(6);
         let mut torque = [0.0; 9];

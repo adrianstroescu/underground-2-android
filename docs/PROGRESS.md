@@ -1,7 +1,7 @@
 # Progress and next steps
 
-Where the port stands, so work can pick up from here. Last updated 2026-10-16
-(evening). What we know about the original game's data and shaders is in
+Where the port stands, so work can pick up from here. Last updated 2026-10-17
+(paused at the owner's request). What we know about the original game's data and shaders is in
 `../CLAUDE.md`.
 
 ## Working (tested on the S23 Ultra, 120 Hz)
@@ -72,6 +72,33 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
 - Hand-driven drift tuning: the autopilot scores only ~10 points per lap against
   rivals at 5–9k, so check `rival_scores` against real driving.
 - Career moving between regions.
+
+## Session 2026-10-17 (paused here)
+
+Done and pushed:
+- EA Trax drives the music (menu vs racing sets, sequential / random, no repeats);
+  tested on the S23.
+- `ug2-formats/carphysics.rs` and `ug2-engine/powertrain.rs`: the original engine,
+  clutch state machine, automatic gearbox, drive split and drag shift quality from
+  speed2.exe. Checked against `docs/re/physics1_ref.py`; NOT wired into the car yet
+  (vehicle.rs is still the invented arcade model).
+- Reverse-engineering notes, all in `docs/re/`: physics part 1 (`physics1_re.md`) and
+  part 2 (`physics2_re.md`: rigid body, suspension, tyres, 5-pass solve, steering,
+  aero, drift / drag modes, MellowMover), AI racers and traffic (`ai_re*.md`), career
+  start and car lot (`career_start_re.md`). Reference sims `physics*_ref.py`,
+  `ai_ref*.py` (not validated against the game).
+
+Resume with, in order:
+1. Port physics part 2 into a new `physics.rs` mover (rigid body + suspension + tyres +
+   powertrain), replacing vehicle.rs for the player; then compare against the PC game.
+   Open: steering controller blend 0x405dc0 / 0x4060e0, collision impulse callers,
+   car+0x42c / +0x424, damage 0x5ed5d0, per-car grip 0x599170.
+2. Career rewrite to the original: $0 start, scene01 → DDAY_EVENT_A in Rachel's 350Z →
+   free starter car at the car lot → DDAY_EVENT_B to the crib; no car prices (5 slots,
+   one per sponsor), bonus zones and tip money. Remove career.rs's invented prices.
+3. AI: MellowMover / PhysicsMover switching, planner and PsychoDriver, rubber band;
+   traffic spawn spacing per level.
+4. Then the rest of the to-do list below; mobile HUD redesign last.
 
 ## Known issues and to-do
 

@@ -410,7 +410,18 @@ shares the scene depth. Per frame, in this order:
   a new car starts in neutral, clutch 0, engaging. Upshift quality (0x594f20, windows
   0x7fbf60 by skill row +0xf0 = 3) gives the drag "perfect shift" throttle bonus
   (1 + 2·q fading over 0.5 s); a drag shift outside clutch state 1 is a missed shift
-  (no throttle 0.45 s). Who puts the drag clutch in state 1 is not traced yet.
+  (no throttle 0.45 s). The drag clutch follows a pedal / button (0x594910, input
+  +0x2f4): pressed = state 1, released = state 3. drivetrain+0x74 is always 0.
+- Gear request: input +0x1e4 (−1 auto, −2 semi-auto, else gear, 0 = reverse); reverse
+  when brake > gas + 0.2 with raw brake > 0.6 and gas < 0.5 (0x4077d0).
+- Part 2 (`docs/re/physics2_re.md`): rigid body (rec 0x220 mass, 0x230 inertia, player
+  yaw inertia × rec 0x270, g 9.8, force clamp 1200 kN), suspension ray along body up,
+  spring k·x·(1+prog·x) + dampers + preload + anti-roll, load = max(1−4(lat·n)², 0.3)·F;
+  tyres: slide if |slip| > 0.5 m/s or locked, lateral from a 7-curve table by slip
+  angle / rec+0, ×2.5; brakes rec 0x384 ×4, handbrake 0x388 ×10, bias 0x38c (rec
+  0x1E0+4/+8 are lateral-curve parameters, NOT brakes); 5-pass solve (keeps the game's
+  row1.x sign quirk on steered wheels); Ackermann, lock ±45°, max lock 40° → ~2.9° with
+  speed; downforce LINEAR in speed (rec 0x374 / 0x378 × |v|, ±1 m from the CG).
 
 ### AI opponents and traffic (`docs/re/ai_re*.md`, static analysis, not yet ported)
 
