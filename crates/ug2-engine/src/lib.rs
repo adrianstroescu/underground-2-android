@@ -11,6 +11,7 @@ pub mod config;
 pub mod drift;
 pub mod font;
 pub mod fe;
+pub mod fe_list;
 mod frontend;
 pub mod hud;
 pub mod input;
@@ -845,6 +846,22 @@ impl Game {
                 self.fe.open_quick_race_modes();
                 true
             }
+            Some(fe::FeKind::OptionsMain) => {
+                self.fe.open_main_menu();
+                true
+            }
+            Some(fe::FeKind::Options) => {
+                // Leaving a category keeps its values (the profile is saved).
+                if let Some((_, values)) = self.fe.options_values() {
+                    for (k, v) in values {
+                        self.cfg.options.insert(k.to_string(), v);
+                    }
+                    self.cfg.save(&self.config_path);
+                    self.apply_options();
+                }
+                self.fe.open_options_main();
+                true
+            }
             Some(fe::FeKind::QuickRaceCar) => {
                 let mode = self.quick.chosen.as_ref().map(|r| r.mode);
                 let settings = self.quick.settings[frontend::QuickRace::slot(mode)];
@@ -862,6 +879,19 @@ impl Game {
             }
             _ => false,
         }
+    }
+
+    /// Puts the Options values into effect where the port has the feature.
+    fn apply_options(&mut self) {
+        let o = &self.cfg.options;
+        let get = |k: &str, d: f32| o.get(k).copied().unwrap_or(d);
+        log::info!(
+            "options: master {} transmission {} camera {} units {}",
+            get("master_volume", 1.0),
+            get("transmission", 0.0),
+            get("camera", 3.0),
+            get("speedo_units", 0.0)
+        );
     }
 
     /// The original car select: the racer car types in GLOBALB order, without the ones
@@ -929,7 +959,34 @@ impl Game {
                 return;
             }
             fe::FeAction::Customize => frontend::Row::Garage,
-            fe::FeAction::Options => frontend::Row::Options,
+            fe::FeAction::Options => {
+                self.fe.open_options_main();
+                return;
+            }
+            fe::FeAction::OptionsCategory(c) => {
+                let opts = self.cfg.options.clone();
+                if !self.fe.open_options(c, |k| opts.get(k).copied()) {
+                    // EA Trax and Credits are not done yet.
+                    log::info!("options category {c} not available");
+                }
+                return;
+            }
+            fe::FeAction::Back => {
+                self.fe_back();
+                return;
+            }
+            fe::FeAction::Quit => {
+                log::info!("quit game");
+                std::process::exit(0);
+            }
+            fe::FeAction::CustomizeCar => {
+                // The garage is still the port's own.
+                frontend::Row::Garage
+            }
+            fe::FeAction::ListButton(key) => {
+                log::info!("options row {key}");
+                return;
+            }
             fe::FeAction::Mode(m) => {
                 // Picking a mode resets the opponents to 3 (5 in URL), speed2.exe 0x4b2c00.
                 self.quick.settings[frontend::QuickRace::slot(Some(m))].opponents = if m == roads::Mode::Url { 5 } else { 3 };

@@ -12,6 +12,7 @@ use ug2_formats::bin_hash;
 use ug2_formats::feng_scene::{QuadSource, Scene};
 
 use crate::assets::FrontendData;
+use crate::fe_list::{Label, OptionList, Row, Tap};
 use crate::render::{FeBatch, FeVertex};
 
 /// What a frontend option asks the game to do.
@@ -30,6 +31,16 @@ pub enum FeAction {
     OptionsDone,
     /// A car was chosen on the car select screen.
     CarDone,
+    /// An Options category was chosen (speed2.exe [0x83aa04]).
+    OptionsCategory(u8),
+    /// Accept on an Options row (its key).
+    ListButton(&'static str),
+    /// The help bar's Back button.
+    Back,
+    /// The help bar's Quit Game button.
+    Quit,
+    /// The help bar's Customize button (car select).
+    CustomizeCar,
 }
 
 /// Which original screen is up.
@@ -40,6 +51,8 @@ pub enum FeKind {
     QuickRaceTrack,
     QuickRaceOptions,
     QuickRaceCar,
+    OptionsMain,
+    Options,
 }
 
 /// Cars a new profile has in quick race (speed2.exe table 0x7f7c08); the others unlock
@@ -82,62 +95,14 @@ impl Default for ModeSettings {
     }
 }
 
-/// The rows of the mode options screen (speed2.exe 0x4ccf60 and the builders after it).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OptKey {
-    Direction,
-    LapKo,
-    Laps,
-    Traffic,
-    Opponents,
-    Difficulty,
-    CatchUp,
+/// Which list a list screen shows.
+#[derive(Clone, Debug)]
+pub enum ListKind {
+    /// Quick race game options for a mode (None: Free Run) and the chosen race.
+    QuickRace { mode: Option<crate::roads::Mode>, race: Option<crate::roads::RaceInfo> },
+    /// An Options category (speed2.exe [0x83aa04]: 0 Audio, 2 Gameplay, 3 Player).
+    Options(u8),
 }
-
-impl OptKey {
-    fn label(self) -> u32 {
-        match self {
-            OptKey::Direction => 0xa88f_feb4,
-            OptKey::LapKo => 0x7fd7_3849,
-            OptKey::Laps => 0x4849_4e83,
-            OptKey::Traffic => 0xeb9d_fc09,
-            OptKey::Opponents => 0x3384_a679,
-            OptKey::Difficulty => 0x4d15_6786,
-            OptKey::CatchUp => 0x8b8e_913a,
-        }
-    }
-}
-
-/// One row's objects (OPTION_NAME_n, OPTION_DATA_n, LEFT_ARROW_n, RIGHT_ARROW_n,
-/// OPTION_BACKING_n).
-#[derive(Clone, Copy, Debug, Default)]
-struct RowObjects {
-    name: Option<usize>,
-    data: Option<usize>,
-    left: Option<usize>,
-    right: Option<usize>,
-    backing: Option<usize>,
-}
-
-/// The scrolling option list of `UI_QRModeOptions.fng` (speed2.exe 0x552780). Rows are
-/// laid out from the TITLE_MASTER and DATA_MASTER rectangles, one title height apart
-/// (0x51ff80, 0x54ef30); 7 rows show at a time.
-struct OptionList {
-    keys: Vec<OptKey>,
-    rows: Vec<RowObjects>,
-    selected: usize,
-    top: usize,
-    /// Highlighted row whose scripts were last set.
-    shown: Option<usize>,
-    /// Left, top, width, height.
-    title: [f32; 4],
-    data: [f32; 4],
-    settings: ModeSettings,
-    mode: Option<crate::roads::Mode>,
-    race: Option<crate::roads::RaceInfo>,
-}
-
-const VISIBLE_ROWS: usize = 7;
 
 /// Something an option shows elsewhere on the screen while it is selected.
 #[derive(Clone, Debug)]
@@ -187,6 +152,7 @@ pub struct FeScreen {
     pub kind: FeKind,
     menu: IconMenu,
     list: Option<OptionList>,
+    list_kind: Option<ListKind>,
     car: Option<CarSelect>,
 }
 
@@ -194,6 +160,34 @@ pub struct FeScreen {
 pub struct Frontend {
     pub data: Option<Box<FrontendData>>,
     pub screen: Option<FeScreen>,
+    /// The PC help bar (UI_PC_Help_Bar, in GLOBALB) under every screen.
+    help: Option<HelpBar>,
+}
+
+/// The PC help bar: up to six buttons, filled in the order of the screen's flag bits
+/// (the 4th word of its factory entry, speed2.exe 0x7f7de4..; labels from 0x52d330).
+struct HelpBar {
+    scene: Scene,
+    /// (slot icon, slot text, flag bit) of the buttons shown.
+    buttons: Vec<(usize, usize, u32)>,
+    flags: u32,
+}
+
+/// Help bar slots as the PC game fills them: bottom right, top right, then leftwards.
+const HELP_SLOTS: [(&str, &str); 6] =
+    [("icon_1", "button1"), ("icon_2", "button2"), ("icon_3", "button3"), ("icon_4", "button4"), ("icon_5", "button5"), ("icon_6", "Button6")];
+
+/// Help bar flag bits and their labels (speed2.exe 0x52d330).
+const HELP_LABELS: [(u32, u32); 4] = [(0x1, 0x1c10_1778), (0x4, 0x9f1b_2c7a), (0x400, 0x1c07_87e6), (0x1000, 0x8d5a_bf58)];
+
+/// Help bar flags per screen (the factory table).
+fn help_flags(kind: FeKind) -> u32 {
+    match kind {
+        FeKind::MainMenu => 0x5,
+        FeKind::QuickRaceMode | FeKind::QuickRaceTrack | FeKind::QuickRaceOptions | FeKind::OptionsMain => 0x405,
+        FeKind::QuickRaceCar => 0x1405,
+        FeKind::Options => 0x401,
+    }
 }
 
 fn h(name: &str) -> u32 {
@@ -276,90 +270,187 @@ impl Frontend {
         self.open_icon_menu("UI_QRTrackSelect.fng", FeKind::QuickRaceTrack, options)
     }
 
-    /// Quick race mode options (UI_QRModeOptions). `mode` None is Free Run.
+    /// Quick race mode options (UI_QRModeOptions), rows as speed2.exe builds them
+    /// (0x4ccf60 and the builders after it). `mode` None is Free Run.
     pub fn open_mode_options(&mut self, mode: Option<crate::roads::Mode>, race: Option<crate::roads::RaceInfo>, settings: ModeSettings) -> bool {
         use crate::roads::Mode;
+        let reversible = race.as_ref().is_some_and(|r| r.reversible);
+        let track = race.as_ref().map_or(0, |r| r.track);
+        let drift_kind = race.as_ref().map_or(0, |r| r.drift_kind);
+        let s = settings;
+        let direction = || Row::choice("reverse", 0xa88f_feb4, vec![Label::Hash(0x9e4c_4648, "Forward"), Label::Hash(0x22f2_54af, "Reverse")], s.reverse as u8 as f32);
+        let lap_ko = || Row::on_off("lap_ko", 0x7fd7_3849, s.lap_ko);
+        let laps = || Row::number("laps", 0x4849_4e83, 1, 10, s.laps as f32);
+        let traffic = || {
+            let v = vec![
+                Label::Hash(0x896b_cb4d, "None"),
+                Label::Hash(0xb6bd_9c95, "Minimum"),
+                Label::Hash(0x907c_555e, "Moderate"),
+                Label::Hash(0xb672_f15a, "Maximum"),
+            ];
+            Row::choice("traffic", 0xeb9d_fc09, v, s.traffic as f32)
+        };
+        // Opponents: 0 (quick race) to 3, or 5 in URL, one human; 2 on drag track 0x1132.
+        let max_opp = if mode == Some(Mode::Drag) && track == 0x1132 {
+            2
+        } else if mode == Some(Mode::Url) {
+            5
+        } else {
+            3
+        };
+        let opponents = || Row::number("opponents", 0x3384_a679, 0, max_opp, s.opponents.min(max_opp as u8) as f32);
+        let difficulty = || {
+            let v = vec![Label::Hash(0xdbbb_4e8f, "Easy"), Label::Hash(0xcab2_62de, "Medium"), Label::Hash(0xdbbc_f37c, "Hard")];
+            Row::choice("difficulty", 0x4d15_6786, v, s.difficulty as f32)
+        };
+        let catch_up = || Row::on_off("catch_up", 0x8b8e_913a, s.catch_up);
+        let mut rows = Vec::new();
+        if reversible {
+            rows.push(direction());
+        }
+        match mode {
+            Some(Mode::Circuit) => rows.extend([lap_ko(), laps(), traffic(), opponents(), difficulty(), catch_up()]),
+            Some(Mode::Sprint) => rows.extend([traffic(), opponents(), difficulty(), catch_up()]),
+            Some(Mode::Drag) => {
+                if !(0x1073..=0x107f).contains(&track) {
+                    rows.push(traffic());
+                }
+                rows.extend([opponents(), difficulty(), catch_up()]);
+            }
+            Some(Mode::Drift) => {
+                if drift_kind == 0 {
+                    rows.extend([laps(), opponents()]);
+                }
+                rows.push(difficulty());
+                if drift_kind == 1 {
+                    rows.push(traffic());
+                }
+            }
+            Some(Mode::Url | Mode::StreetX) => rows.extend([laps(), opponents(), difficulty(), catch_up()]),
+            None => rows.push(traffic()),
+        }
+        // "Quick Race Game Options".
+        let ok = self.open_list("UI_QRModeOptions.fng", FeKind::QuickRaceOptions, 0x4759_7606, rows, ListKind::QuickRace { mode, race });
+        if let Some(l) = self.screen.as_mut().and_then(|s| s.list.as_mut()) {
+            qr_constrain(l);
+        }
+        ok
+    }
+
+    /// The Options categories (UI_OptionsMain, speed2.exe 0x4b6230). Display (PC
+    /// resolution and detail) and the PC key bindings have no counterpart here yet.
+    pub fn open_options_main(&mut self) -> bool {
+        let options = vec![
+            opt(0xf37a_f144, 0xe76c_d783, FeAction::OptionsCategory(0)),
+            opt(0x4df9_8fb2, 0xd0cf_6ee1, FeAction::OptionsCategory(2)),
+            opt(0xd708_efef, 0xf760_eabe, FeAction::OptionsCategory(3)),
+            opt(0xc52c_cbf6, 0xdcfb_6b36, FeAction::OptionsCategory(5)),
+            opt(0x5100_9e20, 0x0905_101f, FeAction::OptionsCategory(8)),
+        ];
+        self.open_icon_menu("UI_OptionsMain.fng", FeKind::OptionsMain, options)
+    }
+
+    /// An Options category (UI_Options, rows from speed2.exe 0x4b8470) with the saved
+    /// values (`get(key)`, default when missing).
+    pub fn open_options(&mut self, category: u8, get: impl Fn(&str) -> Option<f32>) -> bool {
+        let v = |k: &str, d: f32| get(k).unwrap_or(d);
+        let off_on = |k: &'static str, label: u32, d: bool| Row::on_off(k, label, v(k, d as u8 as f32) != 0.0);
+        let rows = match category {
+            // Audio (0x4b6e60): volumes 0..1 in steps of 0.05.
+            0 => vec![
+                Row::slider("master_volume", 0x2678_2c3e, v("master_volume", 1.0)),
+                Row::slider("menu_music_volume", 0x418e_681d, v("menu_music_volume", 0.7)),
+                Row::slider("game_music_volume", 0xdf21_eac2, v("game_music_volume", 1.0)),
+                Row::slider("speech_volume", 0x9e5f_b82a, v("speech_volume", 1.0)),
+                Row::slider("sfx_volume", 0xfd48_7543, v("sfx_volume", 1.0)),
+                Row::slider("tire_volume", 0x69b7_45c6, v("tire_volume", 1.0)),
+                Row::slider("engine_volume", 0xa2b1_f888, v("engine_volume", 1.0)),
+                Row::choice("audio_mode", 0x2881_ab87, vec![Label::Hash(0xc50f_a35f, "Mono"), Label::Hash(0x55da_8bf8, "Stereo")], v("audio_mode", 1.0)),
+            ],
+            // Gameplay (0x4b7310).
+            2 => {
+                let map = |k: &'static str, label: u32| {
+                    let vals = vec![Label::Hash(0xccfa, "Off"), Label::Hash(0xf755_95f2, "Static"), Label::Hash(0xf4b0_0e99, "Rotate")];
+                    Row::choice(k, label, vals, v(k, 2.0))
+                };
+                vec![
+                    off_on("jump_camera", 0xf26a_5cbf, true),
+                    off_on("rearview_mirror", 0x85a6_ce05, true),
+                    Row::choice("speedo_units", 0xf86a_6272, vec![Label::Hash(0x8569_ab44, "MPH"), Label::Hash(0x8569_a25f, "KM/H")], v("speedo_units", 0.0)),
+                    Row::choice(
+                        "career_difficulty",
+                        0xbc0e_6c55,
+                        vec![Label::Hash(0xdbbb_4e8f, "Easy"), Label::Hash(0xcab2_62de, "Medium"), Label::Hash(0xdbbc_f37c, "Hard")],
+                        v("career_difficulty", 1.0),
+                    ),
+                    map("explore_map", 0xc626_9082),
+                    map("race_map", 0x9fa5_ec9e),
+                    Row::choice(
+                        "save",
+                        0x9964_63e6,
+                        vec![Label::Hash(0x1b7a_bf90, "Off"), Label::Hash(0x1b7a_bf8f, "Prompt"), Label::Hash(0x1b7a_bf8e, "Autosave")],
+                        v("save", 1.0),
+                    ),
+                ]
+            }
+            // Player (0x4b7cd0); the wheel rows only show with a wheel.
+            3 => vec![
+                Row::choice("transmission", 0xd314_07e7, vec![Label::Hash(0x61cb_0720, "Auto"), Label::Hash(0x1b3a_2485, "Manual")], v("transmission", 0.0)),
+                // Stored inverted: 0 = On.
+                Row::choice("stability_control", 0xdf06_ed22, vec![Label::Hash(0x063c, "On"), Label::Hash(0xccfa, "Off")], v("stability_control", 1.0)),
+                Row::choice(
+                    "camera",
+                    0xf6cc_dc5f,
+                    vec![Label::Hash(0xc3e9_ae58, "Bumper"), Label::Hash(0x414f_19d7, "Hood"), Label::Hash(0x5ae3_441f, "Close"), Label::Hash(0x1ea4_cec2, "Far")],
+                    v("camera", 3.0),
+                ),
+                off_on("gauges", 0xac14_8579, true),
+                off_on("race_position", 0x82cd_8f92, true),
+                off_on("lap_info", 0x969f_96a5, true),
+                Row::choice(
+                    "split_time",
+                    0x084b_c378,
+                    vec![
+                        Label::Hash(0xd93f_8f55, "Leader"),
+                        Label::Hash(0xc44d_3943, "Lap Record"),
+                        Label::Hash(0x17fa_fc32, "Best Lap"),
+                        Label::Hash(0x1ea4_59f8, "Last Lap"),
+                        Label::Hash(0xccfa, "Off"),
+                    ],
+                    v("split_time", 0.0),
+                ),
+                off_on("score", 0xc03f_9f19, true),
+                off_on("leaderboard", 0xc93f_bfb5, true),
+                off_on("ask_transmission", 0xbfb3_4120, true),
+            ],
+            _ => return false,
+        };
+        // The header is the category's name.
+        let header = match category {
+            0 => 0xe76c_d783,
+            2 => 0xd0cf_6ee1,
+            _ => 0xf760_eabe,
+        };
+        self.open_list("UI_Options.fng", FeKind::Options, header, rows, ListKind::Options(category))
+    }
+
+    fn open_list(&mut self, package: &str, kind: FeKind, header: u32, rows: Vec<Row>, list_kind: ListKind) -> bool {
         let Some(data) = &self.data else { return false };
-        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_QRModeOptions.fng")) else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case(package)) else { return false };
         let mut scene = Scene::new(pkg.clone());
         scene.advance(1.0);
         scene.send_named("CALL PACKAGE");
         scene.send_named("CALL FRAMES");
-        let reversible = race.as_ref().is_some_and(|r| r.reversible);
-        let mut keys = Vec::new();
-        if reversible {
-            keys.push(OptKey::Direction);
-        }
-        let track = race.as_ref().map_or(0, |r| r.track);
-        let drift_kind = race.as_ref().map_or(0, |r| r.drift_kind);
-        match mode {
-            Some(Mode::Circuit) => keys.extend([OptKey::LapKo, OptKey::Laps, OptKey::Traffic, OptKey::Opponents, OptKey::Difficulty, OptKey::CatchUp]),
-            Some(Mode::Sprint) => keys.extend([OptKey::Traffic, OptKey::Opponents, OptKey::Difficulty, OptKey::CatchUp]),
-            Some(Mode::Drag) => {
-                if !(0x1073..=0x107f).contains(&track) {
-                    keys.push(OptKey::Traffic);
-                }
-                keys.extend([OptKey::Opponents, OptKey::Difficulty, OptKey::CatchUp]);
-            }
-            Some(Mode::Drift) => {
-                if drift_kind == 0 {
-                    keys.extend([OptKey::Laps, OptKey::Opponents]);
-                }
-                keys.push(OptKey::Difficulty);
-                if drift_kind == 1 {
-                    keys.push(OptKey::Traffic);
-                }
-            }
-            Some(Mode::Url | Mode::StreetX) => keys.extend([OptKey::Laps, OptKey::Opponents, OptKey::Difficulty, OptKey::CatchUp]),
-            None => keys.push(OptKey::Traffic),
-        }
-        let find = |n: &str| scene.index_of(h(n));
-        let rect = |i: Option<usize>, def: [f32; 4]| {
-            i.map_or(def, |i| {
-                // The rectangle as built (the object's own data, before its scripts).
-                let d = &scene.package.objects[i].data;
-                [d[7] - d[14] * 0.5, d[8] - d[15] * 0.5, d[14], d[15]]
-            })
-        };
-        let title = rect(find("TITLE_MASTER"), [-272.0, -140.0, 240.0, 36.0]);
-        let data_rect = rect(find("DATA_MASTER"), [26.0, -140.0, 200.0, 32.0]);
-        let mut rows = Vec::new();
-        for n in 1..=16 {
-            rows.push(RowObjects {
-                name: find(&format!("OPTION_NAME_{n}")),
-                data: find(&format!("OPTION_DATA_{n}")),
-                left: find(&format!("LEFT_ARROW_{n}")),
-                right: find(&format!("RIGHT_ARROW_{n}")),
-                backing: find(&format!("OPTION_BACKING_{n}")),
-            });
-        }
-        // Unused rows, the sliders (not used here) and debug objects stay hidden.
-        let mut hidden: Vec<usize> = Vec::new();
-        for r in rows.iter().skip(keys.len()) {
-            hidden.extend([r.name, r.data, r.left, r.right, r.backing].into_iter().flatten());
-        }
-        for n in 1..=16 {
-            for part in ["KNOB", "HANDLE", "BEG", "END", "BASE"] {
-                hidden.extend(find(&format!("SLIDER_{part}_{n}")));
+        if let Some(i) = scene.index_of(h("HEADER_TEXT")) {
+            if let Some(t) = data.strings.by_hash(header) {
+                scene.states[i].text = Some(t.to_string());
             }
         }
-        hidden.extend(["_EVENT_HANDLER_", "DEMO_CAR_SELECT"].into_iter().filter_map(find));
-        rows.truncate(keys.len());
-        if let Some(i) = find("HEADER_TEXT") {
-            // "Quick Race Game Options".
-            scene.states[i].text = data.strings.by_hash(0x4759_7606).map(str::to_string);
-        }
-        for r in &rows {
-            for i in [r.name, r.data, r.left, r.right, r.backing].into_iter().flatten() {
-                scene.states[i].hidden = Some(false);
-                scene.set_script(i, h("UNHIGHLIGHT"));
-            }
-        }
+        let visible = if kind == FeKind::QuickRaceOptions { 7 } else { 8 };
+        let (list, hidden) = OptionList::new(&mut scene, rows, visible);
         let mut menu = IconMenu::default();
         menu.hidden = hidden;
-        let mut list = OptionList { keys, rows, selected: 0, top: 0, shown: None, title, data: data_rect, settings, mode, race };
-        list.constrain();
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceOptions, menu, list: Some(list), car: None };
+        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -390,7 +481,7 @@ impl Frontend {
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, car: Some(car) };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car) };
         s.apply(&data.strings);
         s.apply_car(data);
         self.screen = Some(s);
@@ -427,25 +518,35 @@ impl Frontend {
         c.cars.get(c.selected).map(|(n, _)| n.as_str())
     }
 
-    /// The settings on the options screen.
+    /// The settings on the quick race options screen.
     pub fn mode_settings(&self) -> Option<ModeSettings> {
-        Some(self.screen.as_ref()?.list.as_ref()?.settings)
+        let s = self.screen.as_ref()?;
+        let l = s.list.as_ref()?;
+        let Some(ListKind::QuickRace { .. }) = s.list_kind else { return None };
+        let d = ModeSettings::default();
+        let g = |k: &str, d: f32| l.get(k).unwrap_or(d);
+        Some(ModeSettings {
+            reverse: g("reverse", d.reverse as u8 as f32) != 0.0,
+            lap_ko: g("lap_ko", d.lap_ko as u8 as f32) != 0.0,
+            laps: g("laps", d.laps as f32) as u32,
+            traffic: g("traffic", d.traffic as f32) as u8,
+            opponents: g("opponents", d.opponents as f32) as u8,
+            difficulty: g("difficulty", d.difficulty as f32) as u8,
+            catch_up: g("catch_up", d.catch_up as u8 as f32) != 0.0,
+        })
+    }
+
+    /// The values on an Options category screen: (category, [(key, value)]).
+    pub fn options_values(&self) -> Option<(u8, Vec<(&'static str, f32)>)> {
+        let s = self.screen.as_ref()?;
+        let Some(ListKind::Options(c)) = s.list_kind else { return None };
+        Some((c, s.list.as_ref()?.rows.iter().map(|r| (r.key, r.value)).collect()))
     }
 
     /// Up / down on a list screen.
     pub fn step_row(&mut self, delta: i32) -> bool {
         let Some(l) = self.screen.as_mut().and_then(|s| s.list.as_mut()) else { return false };
-        let n = l.keys.len() as i32;
-        if n == 0 {
-            return false;
-        }
-        // The list wraps (+0x146).
-        l.selected = (l.selected as i32 + delta).rem_euclid(n) as usize;
-        if l.selected < l.top {
-            l.top = l.selected;
-        } else if l.selected >= l.top + VISIBLE_ROWS {
-            l.top = l.selected + 1 - VISIBLE_ROWS;
-        }
+        l.step_row(delta);
         true
     }
 
@@ -508,7 +609,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None, car: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -523,6 +624,22 @@ impl Frontend {
         s.scene.advance(dt * 1000.0);
         if let Some(c) = &mut s.car {
             c.settled += dt;
+        }
+        let kind = s.kind;
+        if self.help.is_none() {
+            self.help = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_PC_Help_Bar.fng")).map(|p| {
+                let mut scene = Scene::new(p.clone());
+                scene.advance(1.0);
+                scene.send_named("CALL PACKAGE");
+                HelpBar { scene, buttons: Vec::new(), flags: u32::MAX }
+            });
+        }
+        if let Some(hb) = &mut self.help {
+            hb.scene.advance(dt * 1000.0);
+            let flags = help_flags(kind);
+            if hb.flags != flags {
+                hb.set(flags, &data.strings);
+            }
         }
         let target = s.menu.selected as f32;
         let step = dt / SCROLL_TIME;
@@ -550,12 +667,9 @@ impl Frontend {
             return true;
         }
         if let Some(l) = &mut s.list {
-            let changed = l.change(delta);
-            if changed {
-                let r = l.rows[l.selected];
-                if let Some(a) = if delta < 0 { r.left } else { r.right } {
-                    s.scene.set_script(a, h("Blink"));
-                }
+            let changed = l.change(delta, &mut s.scene);
+            if changed && matches!(s.list_kind, Some(ListKind::QuickRace { .. })) {
+                qr_constrain(l);
             }
             return changed;
         }
@@ -574,8 +688,11 @@ impl Frontend {
 
     pub fn activate(&self) -> Option<FeAction> {
         let s = self.screen.as_ref()?;
-        if s.list.is_some() {
-            return Some(FeAction::OptionsDone);
+        if let Some(l) = &s.list {
+            return match s.list_kind {
+                Some(ListKind::QuickRace { .. }) => Some(FeAction::OptionsDone),
+                _ => l.selected_key().map(FeAction::ListButton),
+            };
         }
         if s.car.is_some() {
             return Some(FeAction::CarDone);
@@ -587,8 +704,31 @@ impl Frontend {
     /// already selected, activated).
     pub fn tap(&mut self, x: f32, y: f32, size: (u32, u32)) -> Option<FeAction> {
         let (vx, vy) = to_virtual(x, y, size);
+        if let Some(bit) = self.help.as_ref().and_then(|hb| hb.hit(vx, vy)) {
+            return match bit {
+                0x1 => Some(FeAction::Quit),
+                0x4 => self.activate(),
+                0x400 => Some(FeAction::Back),
+                0x1000 => Some(FeAction::CustomizeCar),
+                _ => None,
+            };
+        }
         if self.screen.as_ref()?.list.is_some() {
-            return self.tap_list(vx, vy);
+            let s = self.screen.as_mut()?;
+            let l = s.list.as_mut()?;
+            return match l.tap(vx, vy, &mut s.scene) {
+                Tap::Accept => match s.list_kind {
+                    Some(ListKind::QuickRace { .. }) => Some(FeAction::OptionsDone),
+                    _ => l.selected_key().map(FeAction::ListButton),
+                },
+                Tap::Changed => {
+                    if matches!(s.list_kind, Some(ListKind::QuickRace { .. })) {
+                        qr_constrain(l);
+                    }
+                    None
+                }
+                Tap::Nothing => None,
+            };
         }
         if self.screen.as_ref()?.car.is_some() {
             // The filter arrows (PC_FilterType's) change the filter.
@@ -647,42 +787,13 @@ impl Frontend {
         }
     }
 
-    /// A tap on the option list, as the PC mouse: a row is highlighted; on the
-    /// highlighted row the arrows (or the value) change it and its name accepts (the
-    /// name objects post Button_Pressed). The console button bar is hidden on PC.
-    fn tap_list(&mut self, vx: f32, vy: f32) -> Option<FeAction> {
-        let l = self.screen.as_ref()?.list.as_ref()?;
-        let (cx, cy) = (vx - 320.0, vy - 240.0);
-        let row_h = l.title[3];
-        let left = l.title[0];
-        let right = l.data[0] + l.data[2];
-        if cx < left - 30.0 || cx > right + 30.0 || cy < l.title[1] {
-            return None;
-        }
-        let slot = ((cy - l.title[1]) / row_h) as usize;
-        let k = l.top + slot;
-        if slot >= VISIBLE_ROWS || k >= l.keys.len() {
-            return None;
-        }
-        let selected = l.selected;
-        let data_left = l.data[0];
-        if k != selected {
-            let d = k as i32 - selected as i32;
-            self.step_row(d);
-            return None;
-        }
-        if cx < data_left - 30.0 {
-            return Some(FeAction::OptionsDone);
-        }
-        let delta = if cx < data_left + l.data[2] * 0.35 { -1 } else { 1 };
-        self.step(delta);
-        None
-    }
-
     /// The screen's quads in screen pixels, batched by texture.
     pub fn draw(&self, size: (u32, u32), verts: &mut Vec<FeVertex>, batches: &mut Vec<FeBatch>) {
         let (Some(s), Some(data)) = (&self.screen, &self.data) else { return };
-        let quads = s.scene.layout(&data.strings, &data.fonts);
+        let mut quads = s.scene.layout(&data.strings, &data.fonts);
+        if let Some(hb) = &self.help {
+            quads.extend(hb.scene.layout(&data.strings, &data.fonts));
+        }
         let (scale, ox) = mapping(size);
         for q in &quads {
             let texture = match &q.source {
@@ -708,143 +819,7 @@ impl Frontend {
     }
 }
 
-impl OptionList {
-    fn value_text(&self, key: OptKey, strings: &ug2_formats::lang::Strings) -> String {
-        let s = &self.settings;
-        let label = |hash: u32, fallback: &str| strings.by_hash(hash).unwrap_or(fallback).to_string();
-        let on_off = |on: bool| if on { label(bin_hash("On"), "On") } else { label(bin_hash("Off"), "Off") };
-        match key {
-            OptKey::Direction => {
-                if s.reverse {
-                    label(0x22f2_54af, "Reverse")
-                } else {
-                    label(0x9e4c_4648, "Forward")
-                }
-            }
-            OptKey::LapKo => on_off(s.lap_ko),
-            OptKey::Laps => s.laps.to_string(),
-            OptKey::Traffic => match s.traffic {
-                0 => label(0x896b_cb4d, "None"),
-                1 => label(0xb6bd_9c95, "Minimum"),
-                2 => label(0x907c_555e, "Moderate"),
-                _ => label(0xb672_f15a, "Maximum"),
-            },
-            OptKey::Opponents => s.opponents.to_string(),
-            OptKey::Difficulty => match s.difficulty {
-                0 => label(0xdbbb_4e8f, "Easy"),
-                1 => label(0xcab2_62de, "Medium"),
-                _ => label(0xdbbc_f37c, "Hard"),
-            },
-            OptKey::CatchUp => on_off(s.catch_up),
-        }
-    }
-
-    /// Opponents allowed: 0 (quick race) up to 3, or 5 in URL, one human; 2 on drag
-    /// track 0x1132.
-    fn max_opponents(&self) -> u8 {
-        if self.race.as_ref().is_some_and(|r| r.mode == crate::roads::Mode::Drag && r.track == 0x1132) {
-            return 2;
-        }
-        if self.mode == Some(crate::roads::Mode::Url) {
-            5
-        } else {
-            3
-        }
-    }
-
-    fn enabled(&self, key: OptKey) -> bool {
-        !(self.settings.lap_ko && matches!(key, OptKey::Laps | OptKey::Opponents))
-    }
-
-    /// Lap KO forces 3 laps and 3 opponents.
-    fn constrain(&mut self) {
-        let max = self.max_opponents();
-        let s = &mut self.settings;
-        if s.lap_ko {
-            s.laps = 3;
-            s.opponents = 3;
-        }
-        s.opponents = s.opponents.min(max);
-        s.laps = s.laps.clamp(1, 10);
-    }
-
-    /// Left / right on the highlighted row; every option wraps.
-    fn change(&mut self, delta: i32) -> bool {
-        let Some(&key) = self.keys.get(self.selected) else { return false };
-        if !self.enabled(key) {
-            return false;
-        }
-        let wrap = |v: i32, lo: i32, hi: i32| lo + (v - lo).rem_euclid(hi - lo + 1);
-        let max = self.max_opponents() as i32;
-        let s = &mut self.settings;
-        match key {
-            OptKey::Direction => s.reverse = !s.reverse,
-            OptKey::LapKo => s.lap_ko = !s.lap_ko,
-            OptKey::Laps => s.laps = wrap(s.laps as i32 + delta, 1, 10) as u32,
-            OptKey::Traffic => s.traffic = wrap(s.traffic as i32 + delta, 0, 3) as u8,
-            OptKey::Opponents => s.opponents = wrap(s.opponents as i32 + delta, 0, max) as u8,
-            OptKey::Difficulty => s.difficulty = wrap(s.difficulty as i32 + delta, 0, 2) as u8,
-            OptKey::CatchUp => s.catch_up = !s.catch_up,
-        }
-        self.constrain();
-        true
-    }
-}
-
 impl FeScreen {
-    /// Places the option rows (speed2.exe 0x52d800 / 0x52dac0): the name at the title
-    /// rectangle's top-left, the value centred in the data rectangle, the arrows just
-    /// outside it, the backing centred on the row.
-    fn apply_list(&mut self, strings: &ug2_formats::lang::Strings) {
-        let Some(l) = &mut self.list else { return };
-        let [tl, tt, _, th] = l.title;
-        let [dl, _, dw, _] = l.data;
-        let row_cx = (tl + dl + dw) * 0.5;
-        if l.shown != Some(l.selected) {
-            for (k, r) in l.rows.iter().enumerate() {
-                let script = if k == l.selected { h("Highlight") } else { h("UNHIGHLIGHT") };
-                if l.shown == Some(k) || k == l.selected || l.shown.is_none() {
-                    for i in [r.name, r.data, r.left, r.right, r.backing].into_iter().flatten() {
-                        self.scene.set_script(i, script);
-                    }
-                }
-            }
-            l.shown = Some(l.selected);
-        }
-        for (k, r) in l.rows.iter().enumerate() {
-            let visible = k >= l.top && k < l.top + VISIBLE_ROWS;
-            let y = tt + (k as f32 - l.top as f32) * th;
-            let key = l.keys[k];
-            let enabled = l.enabled(key);
-            let st = &mut self.scene.states;
-            if let Some(i) = r.name {
-                st[i].hidden = Some(!visible);
-                st[i].position = Some([tl, y]);
-                st[i].text = strings.by_hash(key.label()).map(str::to_string);
-                st[i].tint = (!enabled).then_some([255, 255, 255, 110]);
-            }
-            if let Some(i) = r.data {
-                st[i].hidden = Some(!visible);
-                st[i].position = Some([dl + dw * 0.5, y]);
-                st[i].text = Some(l.value_text(key, strings));
-                st[i].tint = (!enabled).then_some([255, 255, 255, 110]);
-            }
-            for (a, x) in [(r.left, dl - 12.0), (r.right, dl + dw + 12.0)] {
-                if let Some(i) = a {
-                    st[i].hidden = Some(!visible || !enabled);
-                    st[i].position = Some([x, y + 12.0]);
-                    // U2_MENU_ARROW (speed2.exe 0x54f059).
-                    st[i].texture = Some(0x367b_3e04);
-                }
-            }
-            if let Some(i) = r.backing {
-                st[i].hidden = Some(!visible);
-                // The group's box sits at (−17, 1) inside it.
-                st[i].position = Some([row_cx + 17.0, y + th * 0.5 - 1.0]);
-            }
-        }
-    }
-
     /// Car select (speed2.exe 0x511e60 / 0x4b2310): the logo is
     /// CARSELECT_MANUFACTURER_<make>, the name badge SECONDARY_LOGO_<car type>
     /// (GENERICPLACEHOLDER when missing); the end arrows hide at the ends of the list.
@@ -904,7 +879,9 @@ impl FeScreen {
 
     /// Writes the controller state into the scene, as the game code does every frame.
     fn apply(&mut self, strings: &ug2_formats::lang::Strings) {
-        self.apply_list(strings);
+        if let Some(l) = &mut self.list {
+            l.apply(&mut self.scene, strings);
+        }
         let m = &self.menu;
         for &i in &m.hidden {
             self.scene.states[i].hidden = Some(true);
@@ -952,4 +929,60 @@ pub fn labels(strings: &ug2_formats::lang::Strings) -> HashMap<&'static str, Str
         m.insert(k, strings.by_hash(h).unwrap_or("?").to_string());
     }
     m
+}
+
+/// Lap KO forces 3 laps and 3 opponents and greys both rows out.
+fn qr_constrain(l: &mut OptionList) {
+    let ko = l.get("lap_ko").is_some_and(|v| v != 0.0);
+    if ko {
+        l.set("laps", 3.0);
+        l.set("opponents", 3.0);
+    }
+    l.set_enabled("laps", !ko);
+    l.set_enabled("opponents", !ko);
+}
+
+impl HelpBar {
+    /// Shows the buttons of `flags` in slot order; the hover glows, the EA Messenger
+    /// status and the cash stay hidden.
+    fn set(&mut self, flags: u32, strings: &ug2_formats::lang::Strings) {
+        self.flags = flags;
+        self.buttons.clear();
+        let find = |s: &Scene, n: &str| s.index_of(h(n));
+        let slots: Vec<(Option<usize>, Option<usize>)> = HELP_SLOTS.iter().map(|(i, t)| (find(&self.scene, i), find(&self.scene, t))).collect();
+        let mut next = 0;
+        for &(bit, label) in &HELP_LABELS {
+            if flags & bit == 0 {
+                continue;
+            }
+            if let Some(&(Some(icon), Some(text))) = slots.get(next) {
+                self.scene.states[text].text = strings.by_hash(label).map(str::to_string);
+                self.buttons.push((icon, text, bit));
+            }
+            next += 1;
+        }
+        for (k, &(icon, text)) in slots.iter().enumerate() {
+            for i in [icon, text].into_iter().flatten() {
+                self.scene.states[i].hidden = Some(k >= next);
+            }
+        }
+        let mut hide: Vec<usize> = (1..=5).filter_map(|n| find(&self.scene, &format!("UI_PC_Generic_Button_Glow_{n}"))).collect();
+        hide.extend(self.scene.index_of(0xe0ae_8220));
+        hide.extend(["_EVENT_HANDLER_", "Player_Cash", "PLAYER_NAME"].into_iter().filter_map(|n| find(&self.scene, n)));
+        for n in 1..=4 {
+            hide.extend(find(&self.scene, &format!("PC_EAM_Status_{n}")));
+        }
+        for i in hide {
+            self.scene.states[i].hidden = Some(true);
+        }
+    }
+
+    /// The button (flag bit) at virtual (vx, vy).
+    fn hit(&self, vx: f32, vy: f32) -> Option<u32> {
+        self.buttons.iter().find_map(|&(icon, _, bit)| {
+            let d = self.scene.values(icon);
+            let inside = (vx - 320.0 - d[7]).abs() <= d[14] * 0.5 && (vy - 240.0 - d[8]).abs() <= d[15] * 0.5 + 2.0;
+            inside.then_some(bit)
+        })
+    }
 }

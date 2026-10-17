@@ -30,6 +30,10 @@ pub fn render(game_dir: &str, name: &str, out: &Path, ms: Option<f32>) -> Result
     let mut pkgs = packages(&front);
     // In-game screens (pause, HUD, dialogs) are in GLOBAL/InGame*.bun.
     let mut ingame = Vec::new();
+    // Screens that stay loaded (the PC help bar, dialogs) are in GLOBALB.
+    if let Ok(d) = game.read("GLOBAL/GLOBALB.BUN") {
+        pkgs.extend(packages(&d));
+    }
     for f in ["InGameCommon", "InGameRace", "InGameDrag", "InGameDrift", "InGameFreeRoam", "InGamePerformanceTuning"] {
         if let Ok(d) = game.read(&format!("GLOBAL/{f}.bun")) {
             pkgs.extend(packages(&d));

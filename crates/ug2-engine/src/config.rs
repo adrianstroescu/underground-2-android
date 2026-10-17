@@ -37,6 +37,8 @@ pub struct GameConfig {
     pub bloom: bool,
     /// Visual parts per car.
     pub parts: HashMap<String, PartSet>,
+    /// The original game's options (Options screens), `opt.<key> = value`.
+    pub options: std::collections::BTreeMap<String, f32>,
 }
 
 impl Default for GameConfig {
@@ -58,6 +60,7 @@ impl Default for GameConfig {
             reflections: 1.0,
             bloom: true,
             parts: HashMap::new(),
+            options: Default::default(),
         }
     }
 }
@@ -148,6 +151,11 @@ impl GameConfig {
                         self.parts.insert(k["parts.".len()..].to_string(), p);
                     }
                 }
+                _ if k.starts_with("opt.") => {
+                    if let Some(x) = f() {
+                        self.options.insert(k["opt.".len()..].to_string(), x);
+                    }
+                }
                 "traffic" => self.traffic = v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on"),
                 _ => log::warn!("unknown setting {k}"),
             }
@@ -160,6 +168,10 @@ impl GameConfig {
 
     pub fn to_text(&self) -> String {
         let mut parts = String::new();
+        for (k, v) in &self.options {
+            parts.push_str(&format!("opt.{k} = {v}
+"));
+        }
         for (car, p) in &self.parts {
             if !p.is_stock() {
                 parts.push_str(&format!(

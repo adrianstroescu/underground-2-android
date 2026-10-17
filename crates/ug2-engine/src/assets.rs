@@ -775,7 +775,7 @@ pub struct FrontendData {
 fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let front = ug2_formats::compression::decompress(&game.read_original("FRONTEND/FrontB.lzc")?)?.into_owned();
-    let packages = ug2_formats::feng::packages(&front);
+    let mut packages = ug2_formats::feng::packages(&front);
     let lang = game.read_original("LANGUAGES/English.bin")?;
     let strings = ug2_formats::lang::Strings::parse(&lang);
     let globala = game.read("GLOBAL/GLOBALA.BUN").unwrap_or_default();
@@ -811,6 +811,14 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     let mut ratings = HashMap::new();
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
         ratings = ug2_formats::carstats::car_ratings(&gb).into_iter().collect();
+        // Screens that stay loaded (the PC help bar, dialogs) are in GLOBALB.
+        let resident = ug2_formats::feng::packages(&gb);
+        for p in &resident {
+            for r in &p.resources {
+                wanted.insert(bin_hash(&r.texture_name()));
+            }
+        }
+        packages.extend(resident);
         if let Ok(types) = ug2_formats::carinfo::parse_car_types(&gb) {
             cars = types
                 .iter()
