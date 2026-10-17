@@ -42,6 +42,9 @@ pub enum FeAction {
     /// The help bar's Customize button (car select).
     CustomizeCar,
     /// Pause menu (speed2.exe 0x4c2bd2 race, 0x4c2902 free run).
+    /// Online / LAN play (no network game here).
+    Online,
+    ProfileManager,
     Resume,
     RestartRace,
     Replay,
@@ -210,14 +213,17 @@ impl Frontend {
         self.data.is_some()
     }
 
-    /// The main menu with the options of speed2.exe 0x4aee40 (Online and LAN left out:
-    /// there is no network play here; Profile Manager is not done yet).
+    /// The main menu with the options of speed2.exe 0x4aee40 (icon, label): Career,
+    /// Quick Race, Online, LAN, Customize, Profile Manager, Options.
     pub fn open_main_menu(&mut self) -> bool {
         let options = vec![
-            opt(bin_hash("MAIN_ICON_CAREER"), 0x5e7e_1192, FeAction::Career),
-            opt(bin_hash("MAIN_ICON_QUICK_RACE"), 0x2490_9fd7, FeAction::QuickRace),
-            opt(bin_hash("MAIN_ICON_CUSTOMIZE_CAR"), 0xa530_39a3, FeAction::Customize),
-            opt(bin_hash("MAIN_ICON_OPTIONS"), 0xed1f_0b2c, FeAction::Options),
+            opt(0x0370_4f3d, 0x5e7e_1192, FeAction::Career),
+            opt(0x4e6f_bb02, 0x2490_9fd7, FeAction::QuickRace),
+            opt(0x7718_49a5, 0x7b63_ff85, FeAction::Online),
+            opt(0xd13a_2e66, 0x7294_434c, FeAction::Online),
+            opt(0xb0c4_6023, 0xa530_39a3, FeAction::Customize),
+            opt(0x6b30_3856, 0xbcb1_8f38, FeAction::ProfileManager),
+            opt(0x3058_fe37, 0xed1f_0b2c, FeAction::Options),
         ];
         self.open_icon_menu("UI_Main.fng", FeKind::MainMenu, options)
     }

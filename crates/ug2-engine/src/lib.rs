@@ -1003,6 +1003,10 @@ impl Game {
                 }
                 return;
             }
+            fe::FeAction::Online | fe::FeAction::ProfileManager => {
+                log::info!("{a:?} is not available");
+                return;
+            }
             fe::FeAction::Resume => {
                 self.set_paused(false);
                 return;
