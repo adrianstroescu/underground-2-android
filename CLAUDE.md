@@ -343,6 +343,15 @@ shares the scene depth. Per frame, in this order:
     conditions 0x34A1C.
   - Resume Career lands on the crib menu once DDAY_EVENT_B is done; a new career
     plays Scene01 and then the "drive to the car lot / crib" events (Scene05 / Scene06).
+  - Rules (`career_orig.rs`, `ug2-formats/career.rs`): races open per category (circuit,
+    drag, Street X, drift, sprint, SUV) up to the stage config's caps, picked at random
+    (`0x527d30`); URL races open by win thresholds; a win pays the race's prize only
+    (no money for places or losses); the stage final (stage 1: all its races) advances
+    the stage. A new career starts with $0. 0x34A1C gates car parts, not races.
+  - World Map: `fe_worldmap.rs` (rows 36 apart at MINI_MASTER, TRACKMAP zoom from track
+    record +0x118, stage overview maps TRACKMAP4500..4504).
+- EA Trax: 27 songs in an exe table at `0x7ecd80` (title / artist / album / FE|IG);
+  playlist and modes (Off / Menu / Racing / All) in the profile at `0x83acb8`.
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
