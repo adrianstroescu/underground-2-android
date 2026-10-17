@@ -608,7 +608,7 @@ impl Game {
 
     /// Escape / Android Back / the pause button.
     pub(crate) fn back_pressed(&mut self) {
-        if (self.screen == Screen::Title || (self.screen == Screen::Playing && self.paused && self.fe.screen.is_some())) && self.fe_back() {
+        if (self.screen == Screen::Title || (self.screen == Screen::Playing && self.paused && self.fe.screen.is_some()) || (self.original_results() && self.fe.screen.is_some())) && self.fe_back() {
             return;
         }
         match self.screen {

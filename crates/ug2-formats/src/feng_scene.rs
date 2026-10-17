@@ -331,6 +331,8 @@ fn apply_script(d: &mut [f32; field::WORDS], s: &Script, t: f32) {
 fn layout_text(out: &mut Vec<Quad>, font: &Font, text: &str, justify: u32, max_width: u32, leading: i32, m: Mat4, color: [u8; 4], z: f32, object: usize) {
     // Lines: explicit breaks, then word wrap at max_width (font pixels).
     let mut lines: Vec<String> = Vec::new();
+    // '^' is the strings' line break ("Restart race?^All unsaved ...").
+    let text = text.replace('^', "\n");
     for para in text.split('\n') {
         if max_width == 0 {
             lines.push(para.to_string());

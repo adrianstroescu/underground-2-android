@@ -807,8 +807,9 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     for p in find_tpks(&globala) {
         p.textures.iter().for_each(|t| take(t, &mut out));
     }
-    // The pause menu and in-game dialogs (GLOBAL/InGameCommon.bun).
-    if let Ok(ig) = game.read("GLOBAL/InGameCommon.bun") {
+    // The pause menu, in-game dialogs, post race screens and HUDs (GLOBAL/InGame*.bun).
+    for f in ["InGameCommon", "InGameRace", "InGameDrag", "InGameDrift", "InGameFreeRoam"] {
+        let Ok(ig) = game.read(&format!("GLOBAL/{f}.bun")) else { continue };
         let pk = ug2_formats::feng::packages(&ig);
         let mut need: HashSet<u32> = HashSet::new();
         for p in &pk {
@@ -823,7 +824,11 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
                 }
             }
         }
-        packages.extend(pk);
+        for p in pk {
+            if !packages.iter().any(|q| q.name.eq_ignore_ascii_case(&p.name)) {
+                packages.push(p);
+            }
+        }
     }
     let mut cars = Vec::new();
     let mut ratings = HashMap::new();

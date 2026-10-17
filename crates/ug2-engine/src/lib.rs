@@ -811,7 +811,48 @@ impl Game {
 
     /// The original main menu replaces the title menu once the frontend data is in.
     fn fe_active(&self) -> bool {
-        self.fe.screen.is_some() && self.menu_visible() && (self.screen == Screen::Title || (self.screen == Screen::Playing && self.paused))
+        self.fe.screen.is_some()
+            && self.menu_visible()
+            && (self.screen == Screen::Title || (self.screen == Screen::Playing && self.paused) || self.original_results())
+    }
+
+    /// Quick race results use the original screens (career results are still the port's).
+    fn original_results(&self) -> bool {
+        self.screen == Screen::Results && self.race_prize.is_none()
+    }
+
+    /// The results table rows, in finishing order.
+    fn result_rows(&self) -> Vec<fe::ResultRow> {
+        let Some(r) = self.session.race() else { return Vec::new() };
+        let player_name = self.fe.data.as_ref().and_then(|d| d.strings.by_hash(0xd871_33bc)).unwrap_or("Player 1").to_string();
+        if r.drift.is_some() {
+            return r
+                .drift_standings()
+                .into_iter()
+                .map(|(name, score, player)| fe::ResultRow {
+                    name: if player { player_name.clone() } else { name },
+                    car: if player { self.current_car() } else { String::new() },
+                    time: None,
+                    retired: false,
+                    score: Some(score),
+                    player,
+                })
+                .collect();
+        }
+        r.standings()
+            .into_iter()
+            .map(|car| {
+                let model = if car == 0 { self.current_car() } else { self.session.opponents[car - 1].model.clone() };
+                fe::ResultRow {
+                    name: if car == 0 { player_name.clone() } else { cars::display_name(&model).to_string() },
+                    car: cars::car_name(&model).to_string(),
+                    time: r.cars[car].finish_time,
+                    retired: r.cars[car].retired,
+                    score: None,
+                    player: car == 0,
+                }
+            })
+            .collect()
     }
 
     /// Runs one of the port's own menu rows on the current screen (pause actions).
@@ -825,12 +866,16 @@ impl Game {
         let ready = self.menu_visible() && self.fe.ready();
         let title = self.screen == Screen::Title && ready;
         let pause = self.screen == Screen::Playing && self.paused && ready;
-        if title && (self.fe.screen.is_none() || self.fe.in_pause()) {
+        if title && (self.fe.screen.is_none() || self.fe.in_pause() || self.fe.in_post_race()) {
             self.fe.open_main_menu();
         } else if pause && !self.fe.in_pause() {
             let race = self.session.race().is_some();
             self.fe.open_pause(race);
-        } else if !title && !pause && self.fe.screen.is_some() {
+        } else if self.original_results() && ready && !self.fe.in_post_race() {
+            let rows = self.result_rows();
+            let drift = self.session.race().is_some_and(|r| r.drift.is_some());
+            self.fe.open_results(rows, drift);
+        } else if !title && !pause && !(self.original_results() && ready) && self.fe.screen.is_some() {
             self.fe.close();
         }
         // The car select shows the browsed car on the turntable.
@@ -866,6 +911,13 @@ impl Game {
                 self.fe.open_quick_race_modes();
                 true
             }
+            Some(fe::FeKind::PostRace) => {
+                let rows = self.result_rows();
+                let drift = self.session.race().is_some_and(|r| r.drift.is_some());
+                self.fe.open_results(rows, drift);
+                true
+            }
+            Some(fe::FeKind::PostRaceResults) => true,
             Some(fe::FeKind::StartCareer) => {
                 self.fe.open_main_menu();
                 true
@@ -1064,14 +1116,39 @@ impl Game {
                 return;
             }
             fe::FeAction::QuitToMenu => {
-                // "Quit to Main Menu?" OK / Cancel (speed2.exe 0x4c28c5).
-                if !self.fe.open_dialog(0x30ed_2368, vec![(0x0639, fe::FeAction::ConfirmQuit), (0x5413_89e5, fe::FeAction::CloseDialog)]) {
+                // "Quit to Main Menu?" OK / Cancel (speed2.exe 0x4c28c5); after a race
+                // the longer one (0xe15b558a).
+                let message = if self.screen == Screen::Results { 0xe15b_558a } else { 0x30ed_2368 };
+                if !self.fe.open_dialog(message, vec![(0x0639, fe::FeAction::ConfirmQuit), (0x5413_89e5, fe::FeAction::CloseDialog)]) {
                     self.fe_row(frontend::Row::QuitToMenu);
                 }
                 return;
             }
             fe::FeAction::ConfirmQuit => {
-                self.fe_row(frontend::Row::QuitToMenu);
+                let row = if self.screen == Screen::Results { frontend::Row::Continue } else { frontend::Row::QuitToMenu };
+                self.fe_row(row);
+                return;
+            }
+            fe::FeAction::ResultsNext => {
+                self.fe.open_post_race();
+                return;
+            }
+            fe::FeAction::PostRestart => {
+                let buttons = vec![(0x0639, fe::FeAction::ConfirmRestart), (0x5413_89e5, fe::FeAction::CloseDialog)];
+                if !self.fe.open_dialog(0xaa50_aa02, buttons) {
+                    self.fe_row(frontend::Row::RaceAgain);
+                }
+                return;
+            }
+            fe::FeAction::ConfirmRestart => {
+                self.fe_row(frontend::Row::RaceAgain);
+                return;
+            }
+            fe::FeAction::RaceStats => {
+                // UI_PostRaceStats is not done yet: the results table instead.
+                let rows = self.result_rows();
+                let drift = self.session.race().is_some_and(|r| r.drift.is_some());
+                self.fe.open_results(rows, drift);
                 return;
             }
             fe::FeAction::CloseDialog => return,

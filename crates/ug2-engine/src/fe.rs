@@ -46,6 +46,11 @@ pub enum FeAction {
     ResumeCareer,
     NewCareer,
     LoadGame,
+    /// Post race: Continue on the results, the menu's items, and confirmations.
+    ResultsNext,
+    PostRestart,
+    ConfirmRestart,
+    RaceStats,
     /// Car select accepted, transmission chosen.
     CarChosen,
     TransmissionManual,
@@ -78,6 +83,43 @@ pub enum FeKind {
     PauseOptionsMain,
     PauseOptions,
     StartCareer,
+    PostRaceResults,
+    PostRace,
+}
+
+/// One row of the results table.
+#[derive(Clone, Debug)]
+pub struct ResultRow {
+    pub name: String,
+    /// Car type, shown through its CAR_NAME_<type> label.
+    pub car: String,
+    /// Finish time (s); None when the car did not finish.
+    pub time: Option<f32>,
+    pub retired: bool,
+    /// Drift score.
+    pub score: Option<u32>,
+    pub player: bool,
+}
+
+/// UI_PostRaceResults (speed2.exe 0x4bf290): rank, name, car and time per row; the
+/// time column alternates Finish Time (4.5 s) and Time Behind (1.75 s), or shows the
+/// score in drift.
+struct Results {
+    rows: Vec<ResultRow>,
+    drift: bool,
+    time: f32,
+}
+
+/// Race time as the game prints it (0x576d30, English): "M:SS.hh" with a space for a
+/// single-digit minute (`strip` drops it), "SS.hh" under a minute.
+pub fn race_time(t: f32, strip: bool) -> String {
+    let hs = (t.max(0.0) * 100.0) as u32;
+    let (m, s, h) = (hs / 6000, hs / 100 % 60, hs % 100);
+    if m == 0 {
+        return format!("{s:02}.{h:02}");
+    }
+    let lead = if m < 10 && !strip { " " } else { "" };
+    format!("{lead}{m}:{s:02}.{h:02}")
 }
 
 /// Cars a new profile has in quick race (speed2.exe table 0x7f7c08); the others unlock
@@ -179,6 +221,7 @@ pub struct FeScreen {
     list: Option<OptionList>,
     list_kind: Option<ListKind>,
     car: Option<CarSelect>,
+    results: Option<Results>,
 }
 
 #[derive(Default)]
@@ -223,7 +266,8 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::QuickRaceMode | FeKind::QuickRaceTrack | FeKind::QuickRaceOptions | FeKind::OptionsMain => 0x405,
         FeKind::QuickRaceCar => 0x1405,
         FeKind::Options => 0x401,
-        FeKind::StartCareer => 0x405,
+        FeKind::StartCareer | FeKind::PostRace => 0x405,
+        FeKind::PostRaceResults => 0x5,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -428,6 +472,52 @@ impl Frontend {
         self.dialog.is_some()
     }
 
+    /// The results table after a race.
+    pub fn open_results(&mut self, rows: Vec<ResultRow>, drift: bool) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_PostRaceResults.fng")) else { return false };
+        let mut scene = Scene::new(pkg.clone());
+        scene.advance(1.0);
+        scene.send_named("CALL PACKAGE");
+        scene.send_named("CALL FRAMES");
+        let mut menu = IconMenu::default();
+        // Online and console-only objects.
+        for n in ["_EVENT_HANDLER_", "OL_Countdown_Timer", "Online_DATA_01"] {
+            menu.hidden.extend(scene.index_of(h(n)));
+        }
+        for k in rows.len() + 1..=6 {
+            for p in ["Player_Data", "Ranking_Data", "Car_Data", "Time_Data", "High_Light"] {
+                menu.hidden.extend(scene.index_of(h(&format!("{p}_{k}"))));
+            }
+        }
+        // The player's rank runs "Highlight".
+        if let Some(k) = rows.iter().position(|r| r.player) {
+            if let Some(i) = scene.index_of(h(&format!("Ranking_Data_{}", k + 1))) {
+                scene.set_script(i, h("Highlight"));
+            }
+        }
+        let results = Results { rows, drift, time: 0.0 };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results) };
+        s.apply(&data.strings);
+        self.screen = Some(s);
+        true
+    }
+
+    /// The post race menu (UI_PostRace, speed2.exe 0x4bee10) for a quick race: Restart,
+    /// Race Stats, Quit to Main Menu (Replay only with a replay recorded).
+    pub fn open_post_race(&mut self) -> bool {
+        let options = vec![
+            opt(0xb295_a6b6, 0x8083_3fc2, FeAction::PostRestart),
+            opt(bin_hash("INGAME_ICON_STATS"), 0xf82d_f37e, FeAction::RaceStats),
+            opt(0x4c9e_34e6, 0xc7e1_420c, FeAction::QuitToMenu),
+        ];
+        self.open_icon_menu("UI_PostRace.fng", FeKind::PostRace, options)
+    }
+
+    pub fn in_post_race(&self) -> bool {
+        matches!(self.kind(), Some(FeKind::PostRaceResults | FeKind::PostRace))
+    }
+
     /// The career menu (UI_StartCareer, speed2.exe 0x4af110): Resume Career when a
     /// career is under way, else Start New Career; then Load Game.
     pub fn open_start_career(&mut self, in_progress: bool) -> bool {
@@ -601,7 +691,7 @@ impl Frontend {
         let (list, hidden) = OptionList::new(&mut scene, rows, visible);
         let mut menu = IconMenu::default();
         menu.hidden = hidden;
-        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None };
+        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -632,7 +722,7 @@ impl Frontend {
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car) };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None };
         s.apply(&data.strings);
         s.apply_car(data);
         self.screen = Some(s);
@@ -761,7 +851,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -782,6 +872,9 @@ impl Frontend {
         s.scene.advance(dt * 1000.0);
         if let Some(c) = &mut s.car {
             c.settled += dt;
+        }
+        if let Some(r) = &mut s.results {
+            r.time += dt;
         }
         let kind = s.kind;
         if self.help.is_none() {
@@ -870,6 +963,9 @@ impl Frontend {
         }
         if s.car.is_some() {
             return Some(FeAction::CarDone);
+        }
+        if s.results.is_some() {
+            return Some(FeAction::ResultsNext);
         }
         Some(s.menu.options.get(s.menu.selected)?.action)
     }
@@ -1066,8 +1162,47 @@ impl FeScreen {
         }
     }
 
+    fn apply_results(&mut self, strings: &ug2_formats::lang::Strings) {
+        let Some(r) = &self.results else { return };
+        let label = |hash: u32| strings.by_hash(hash).unwrap_or("").to_string();
+        let behind = !r.drift && r.time % 6.25 >= 4.5;
+        let header = if r.drift {
+            0xc03f_9f19
+        } else if behind {
+            0xe2f9_334d
+        } else {
+            0xc97a_2d22
+        };
+        let leader = r.rows.first().and_then(|x| x.time);
+        let mut set = |n: String, t: String| {
+            if let Some(i) = self.scene.index_of(h(&n)) {
+                self.scene.states[i].text = Some(t);
+            }
+        };
+        set("Header_text_3".into(), label(header));
+        for (k, row) in r.rows.iter().enumerate() {
+            let n = k + 1;
+            set(format!("Ranking_Data_{n}"), format!("{:2}", n));
+            set(format!("Player_Data_{n}"), row.name.clone());
+            let car = strings.by_hash(bin_hash(&format!("CAR_NAME_{}", row.car))).map_or(row.car.clone(), str::to_string);
+            set(format!("Car_Data_{n}"), car);
+            let time = match (row.score, row.time) {
+                (Some(s), _) if r.drift => s.to_string(),
+                _ if row.retired => label(0x01e6_6364),
+                (_, None) => label(0x61c9_b7a2),
+                (_, Some(t)) if behind => match leader {
+                    Some(l) if k > 0 => race_time(t - l, true),
+                    _ => label(0x61c9_b7a2),
+                },
+                (_, Some(t)) => race_time(t, false),
+            };
+            set(format!("Time_Data_{n}"), time);
+        }
+    }
+
     /// Writes the controller state into the scene, as the game code does every frame.
     fn apply(&mut self, strings: &ug2_formats::lang::Strings) {
+        self.apply_results(strings);
         if let Some(l) = &mut self.list {
             l.apply(&mut self.scene, strings);
         }
