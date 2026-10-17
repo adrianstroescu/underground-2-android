@@ -348,6 +348,17 @@ shares the scene depth. Per frame, in this order:
     (`0x527d30`); URL races open by win thresholds; a win pays the race's prize only
     (no money for places or losses); the stage final (stage 1: all its races) advances
     the stage. A new career starts with $0. 0x34A1C gates car parts, not races.
+  - Career start and car lot (`docs/re/career_start_re.md`): no intro race. Reset
+    `0x532830` → $0, slot 0 open but empty → scene01 → DDAY_EVENT_A drives Rachel's car
+    (race +0x2C preset DDAY_PLAYER_CAR, a 350Z) to CC_CAR_LOT_1 (SCENE05 first visit) →
+    a FREE stock car (NA starters: PEUGOT, FOCUS, COROLLA, 240SX, MIATA, CIVIC = player
+    cars, CarTypeInfo +0xDA bit 1, minus region list 0x5022c0, minus locks 0x34A1F) →
+    DDAY_EVENT_B drives it to CRIB_1 (SCENE06) → crib menu.
+  - **Cars are never bought**: the lot never touches cash. Up to 5 car slots; slot 0
+    opens at start, one more per sponsor signing; empty open slot = free car, otherwise
+    trade (parts lost, no refund). Lot stock unlocks by URL races (chunk 0x34A1F).
+  - Other money: hidden bonus zones (chunk 0x34A1E, 59 × $50–400, once each),
+    ENGAGE_TIPS_* messages ($25 / $50 first time), sponsor signing, covers, outrun.
   - World Map: `fe_worldmap.rs` (rows 36 apart at MINI_MASTER, TRACKMAP zoom from track
     record +0x118, stage overview maps TRACKMAP4500..4504).
 - EA Trax: 27 songs in an exe table at `0x7ecd80` (title / artist / album / FE|IG);
