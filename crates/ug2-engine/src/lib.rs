@@ -11,6 +11,7 @@ pub mod config;
 pub mod drift;
 pub mod font;
 pub mod fe;
+pub mod fe_hud;
 pub mod fe_list;
 mod frontend;
 pub mod hud;
@@ -816,6 +817,91 @@ impl Game {
             && (self.screen == Screen::Title || (self.screen == Screen::Playing && self.paused) || self.original_results())
     }
 
+    /// Races whose HUD is HUD_SingleRace (circuit, sprint, URL) use the original HUD;
+    /// drag, drift and Street X have their own packages, not done yet.
+    fn original_hud(&self) -> bool {
+        self.screen == Screen::Playing
+            && self.session.race().is_some_and(|r| matches!(r.def.info.mode, roads::Mode::Circuit | roads::Mode::Sprint | roads::Mode::Url))
+    }
+
+    fn update_race_hud(&mut self, dt: f32) {
+        let on = self.original_hud() && self.fe.ready();
+        self.hud.original_gauges = on;
+        if !on {
+            self.fe.race_hud = None;
+            return;
+        }
+        if self.fe.race_hud.is_none() {
+            if !self.fe.open_race_hud() {
+                return;
+            }
+            // The race's map.
+            if let (Some(r), Some(l)) = (self.session.race(), &self.loader) {
+                let t = r.def.info.track;
+                if self.fe_requested.insert(bin_hash(&format!("TRACKMAP{t}"))) {
+                    l.request(LoadRequest::TrackMap(t));
+                }
+            }
+        }
+        if let Some(input) = self.hud_input() {
+            self.fe.update_race_hud(&input, self.size, dt);
+        }
+    }
+
+    fn hud_input(&self) -> Option<fe_hud::HudInput> {
+        let r = self.session.race()?;
+        let rh = self.race_hud()?;
+        let p = &r.cars[0];
+        let car = self.current_car();
+        let [idle, redline, max, turbo] = self.fe.data.as_ref().and_then(|d| d.engines.get(&car).copied()).unwrap_or([1000.0, 7000.0, 7500.0, 0.0]);
+        // The port's engine speed is 0.18..1 over idle..max.
+        let rpm = idle + (max - idle) * ((self.vehicle.rpm - 0.18) / 0.82).clamp(0.0, 1.0);
+        let player_name = self.fe.data.as_ref().and_then(|d| d.strings.by_hash(0xd871_33bc)).unwrap_or("Player 1").to_string();
+        let leaders = rh
+            .standings
+            .iter()
+            .enumerate()
+            .take(4)
+            .map(|(k, s)| {
+                // Short car names (CAR_NAME_<type>) stand in for the AI drivers' names.
+                let short = self.fe.data.as_ref().and_then(|d| d.strings.by_hash(bin_hash(&format!("CAR_NAME_{}", car_name(&s.name)))));
+                let name = if s.player { player_name.clone() } else { short.map_or_else(|| display_name(&s.name).to_string(), str::to_string) };
+                (k + 1, name, s.gap, s.player, s.value.clone())
+            })
+            .collect();
+        let map_mode = self.cfg.options.get("race_map").copied().unwrap_or(2.0);
+        let info = &r.def.info;
+        let map = (map_mode != 0.0).then(|| fe_hud::MapInput {
+            texture: bin_hash(&format!("TRACKMAP{}", info.track)),
+            calib: info.map,
+            rotate: map_mode == 2.0,
+            player: (self.vehicle.pos.x, self.vehicle.pos.y, self.vehicle.yaw),
+            others: self.session.opponents.iter().map(|o| (o.vehicle.pos.x, o.vehicle.pos.y, o.vehicle.yaw)).collect(),
+        });
+        let racing = rh.countdown.is_none();
+        Some(fe_hud::HudInput {
+            speed_ms: self.vehicle.speed().abs(),
+            rpm,
+            redline,
+            max_rpm: max,
+            turbo: turbo != 0.0,
+            gear: self.vehicle.gear,
+            mph: self.hud.mph,
+            nitro: Some((self.vehicle.nitro, self.vehicle.nitro_on)),
+            place: rh.place,
+            racers: rh.cars,
+            lap: rh.lap,
+            laps: rh.laps,
+            progress: (!rh.circuit).then(|| (1.0 - rh.remaining / r.distance().max(1.0)).clamp(0.0, 1.0)),
+            lap_time: racing.then(|| r.time - p.lap_start),
+            countdown: rh.countdown,
+            go_flash: rh.go_flash,
+            wrong_way: rh.wrong_way,
+            leaders,
+            map,
+        })
+    }
+
     /// Quick race results use the original screens (career results are still the port's).
     fn original_results(&self) -> bool {
         self.screen == Screen::Results && self.race_prize.is_none()
@@ -1276,6 +1362,7 @@ impl Game {
         }
         self.update_movies();
         self.update_fe(dt.clamp(0.0, 0.1));
+        self.update_race_hud(dt.clamp(0.0, 0.1));
         let dt = dt.clamp(0.0, 0.1);
         if dt > 0.0 {
             self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
@@ -1741,10 +1828,12 @@ impl Game {
                 heat: self.vehicle.heat,
             };
             self.hud.draw(&mut self.canvas, &t, show_touch, self.cfg.show_fps);
-            if let Some(r) = self.race_hud() {
-                self.hud.race_overlay(&mut self.canvas, &r);
+            if !self.hud.original_gauges {
+                if let Some(r) = self.race_hud() {
+                    self.hud.race_overlay(&mut self.canvas, &r);
+                }
+                self.draw_minimap();
             }
-            self.draw_minimap();
         }
         if let Status::Loading(s) = &self.status {
             let s = s.clone();
@@ -1876,6 +1965,8 @@ impl Game {
         fe_batches.clear();
         if self.fe_active() {
             self.fe.draw((width, height), &mut fe_verts, &mut fe_batches);
+        } else if self.hud.original_gauges && !self.paused {
+            self.fe.draw_race_hud((width, height), &mut fe_verts, &mut fe_batches);
         }
         let post = self.visual.frame(&visual::FrameInput {
             maps: self.env_maps.as_deref(),

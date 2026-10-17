@@ -767,6 +767,8 @@ pub struct FrontendData {
     pub cars: Vec<(String, String)>,
     /// Car select stat bars (acceleration, top speed, handling) per car type.
     pub ratings: HashMap<String, [f32; 3]>,
+    /// Engine (idle, redline, max rpm, turbo 0/1) per car type, for the HUD.
+    pub engines: HashMap<String, [f32; 4]>,
 }
 
 /// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
@@ -819,7 +821,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         }
         for p in find_tpks(&ig) {
             for t in &p.textures {
-                if need.contains(&t.hash) || t.name.starts_with("INGAME_ICON") {
+                if need.contains(&t.hash) || t.name.starts_with("INGAME_ICON") || t.name.starts_with("3RDPERSON") {
                     take(t, &mut out);
                 }
             }
@@ -830,8 +832,15 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
             }
         }
     }
+    // The HUD's tachometer dials (HUD_CustomTextures_00 when no custom HUD is fitted).
+    if let Ok(c) = game.read("GLOBAL/HUD_CustomTextures_00.bin") {
+        for p in find_tpks(&c) {
+            p.textures.iter().for_each(|t| take(t, &mut out));
+        }
+    }
     let mut cars = Vec::new();
     let mut ratings = HashMap::new();
+    let mut engines = HashMap::new();
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
         ratings = ug2_formats::carstats::car_ratings(&gb).into_iter().collect();
         // Screens that stay loaded (the PC help bar, dialogs) are in GLOBALB.
@@ -843,6 +852,11 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         }
         packages.extend(resident);
         if let Ok(types) = ug2_formats::carinfo::parse_car_types(&gb) {
+            for t in &types {
+                let d = &t.drivetrain;
+                let turbo = d.turbo.iter().any(|x| *x > 0.0);
+                engines.insert(t.name.clone(), [d.idle_rpm, d.redline_rpm, d.max_rpm, turbo as u8 as f32]);
+            }
             cars = types
                 .iter()
                 .filter(|t| t.usage == ug2_formats::carinfo::CarUsage::Racer)
@@ -860,7 +874,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
     let textures = opaque.iter().map(|(h, _)| *h).collect();
     let _ = tx.send(LoadEvent::FeTextures(out, opaque));
-    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings })));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines })));
     Ok(())
 }
 

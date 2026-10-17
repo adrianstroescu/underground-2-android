@@ -379,6 +379,8 @@ pub struct Hud {
     drag: bool,
     /// Speedometer in miles per hour (Options > Gameplay > Speedometer Units).
     pub mph: bool,
+    /// The original HUD draws the gauges (the touch controls stay).
+    pub original_gauges: bool,
     /// Manual gearbox outside drags: shift buttons beside the pedals.
     manual: bool,
 }
@@ -402,6 +404,7 @@ impl Hud {
             touch_seen: false,
             drag: false,
             mph: true,
+            original_gauges: false,
             manual: false,
         }
     }
@@ -633,7 +636,9 @@ impl Hud {
             }
         }
 
-        self.gauge(c, t, vec2(w - 86.0 * s, h - 238.0 * s), 50.0 * s);
+        if !self.original_gauges {
+            self.gauge(c, t, vec2(w - 86.0 * s, h - 238.0 * s), 50.0 * s);
+        }
 
         if show_fps {
             let text = format!("{:.0} FPS  {} DC", t.fps, t.draw_calls);

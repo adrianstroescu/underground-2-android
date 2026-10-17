@@ -232,6 +232,8 @@ pub struct Frontend {
     help: Option<HelpBar>,
     /// A dialog over the screen (GenericDialog_*, speed2.exe 0x558790).
     dialog: Option<Dialog>,
+    /// The original race HUD while racing.
+    pub race_hud: Option<crate::fe_hud::RaceHud>,
 }
 
 /// A generic dialog: the message in `message_blurb`, one to three buttons (two: left
@@ -1069,6 +1071,34 @@ impl Frontend {
         }
     }
 
+    /// Starts the race HUD (HUD_SingleRace).
+    pub fn open_race_hud(&mut self) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("HUD_SingleRace.fng")) else { return false };
+        self.race_hud = Some(crate::fe_hud::RaceHud::new(Scene::new(pkg.clone())));
+        true
+    }
+
+    pub fn update_race_hud(&mut self, input: &crate::fe_hud::HudInput, size: (u32, u32), dt: f32) {
+        let (Some(hud), Some(data)) = (&mut self.race_hud, &self.data) else { return };
+        let (scale, ox) = mapping(size);
+        hud.wide = (ox / scale).max(0.0);
+        hud.update(input, &data.strings, &data.textures, dt);
+    }
+
+    /// The race HUD's quads (drawn under the touch controls).
+    pub fn draw_race_hud(&self, size: (u32, u32), verts: &mut Vec<FeVertex>, batches: &mut Vec<FeBatch>) {
+        let (Some(hud), Some(data)) = (&self.race_hud, &self.data) else { return };
+        let mut quads = hud.scene.layout(&data.strings, &data.fonts);
+        // The map shows as a disc (the game masks it round).
+        let disc = hud.map_object;
+        let (maps, rest): (Vec<_>, Vec<_>) = quads.drain(..).partition(|q| Some(q.object) == disc);
+        for q in &maps {
+            push_disc(q, size, verts, batches);
+        }
+        push_quads(&rest, size, verts, batches);
+    }
+
     /// The screen's quads in screen pixels, batched by texture.
     pub fn draw(&self, size: (u32, u32), verts: &mut Vec<FeVertex>, batches: &mut Vec<FeBatch>) {
         let (Some(s), Some(data)) = (&self.screen, &self.data) else { return };
@@ -1079,8 +1109,40 @@ impl Frontend {
         if let Some(d) = &self.dialog {
             quads.extend(d.scene.layout(&data.strings, &data.fonts));
         }
+        push_quads(&quads, size, verts, batches);
+    }
+}
+
+/// A quad drawn as the disc inscribed in it (32 segments).
+fn push_disc(q: &ug2_formats::feng_scene::Quad, size: (u32, u32), verts: &mut Vec<FeVertex>, batches: &mut Vec<FeBatch>) {
+    let (scale, ox) = mapping(size);
+    let texture = match &q.source {
+        QuadSource::Texture(n) | QuadSource::Font(n) => bin_hash(n),
+        QuadSource::TextureHash(h) => *h,
+        QuadSource::Solid => 0,
+    };
+    let lerp = |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    let at = |s: f32, t: f32| {
+        let p = lerp(lerp(q.corners[0], q.corners[1], s), lerp(q.corners[3], q.corners[2], s), t);
+        let uv = lerp(lerp(q.uv[0], q.uv[1], s), lerp(q.uv[3], q.uv[2], s), t);
+        let c = q.colors[0];
+        FeVertex { pos: [ox + p[0] * scale, p[1] * scale], uv, color: [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, c[3] as f32 / 255.0] }
+    };
+    let first = verts.len() as u32;
+    const N: usize = 32;
+    for k in 0..N {
+        let (a0, a1) = (k as f32 / N as f32 * std::f32::consts::TAU, (k + 1) as f32 / N as f32 * std::f32::consts::TAU);
+        verts.push(at(0.5, 0.5));
+        verts.push(at(0.5 + 0.5 * a0.cos(), 0.5 + 0.5 * a0.sin()));
+        verts.push(at(0.5 + 0.5 * a1.cos(), 0.5 + 0.5 * a1.sin()));
+    }
+    batches.push(FeBatch { texture, first, count: (N * 3) as u32 });
+}
+
+fn push_quads(quads: &[ug2_formats::feng_scene::Quad], size: (u32, u32), verts: &mut Vec<FeVertex>, batches: &mut Vec<FeBatch>) {
+    {
         let (scale, ox) = mapping(size);
-        for q in &quads {
+        for q in quads {
             let texture = match &q.source {
                 QuadSource::Texture(n) | QuadSource::Font(n) => bin_hash(n),
                 QuadSource::TextureHash(h) => *h,

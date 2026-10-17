@@ -217,6 +217,8 @@ pub struct TrackInfo {
     /// upper-left corner and the width it covers.
     pub map_upper_left: [f32; 2],
     pub map_width: f32,
+    /// HUD minimap zoom: the map shows 0.3 / zoom of the image (speed2.exe 0x4ca840).
+    pub map_zoom: f32,
 }
 
 /// Parses the track table from GLOBALB.
@@ -232,8 +234,9 @@ pub fn parse_track_infos(global_b: &[u8]) -> Result<Vec<TrackInfo>> {
             location: u32_at(rec, 0x7C)?,
             drift_kind: rec[0x80],
             reversible: rec[0x86] == 1,
-            map_upper_left: [f32_at(rec, 0xB0)?, f32_at(rec, 0xB4)?],
-            map_width: f32_at(rec, 0xB8)?,
+            map_upper_left: [f32_at(rec, 0xAC)?, f32_at(rec, 0xB0)?],
+            map_width: f32_at(rec, 0xB4)?,
+            map_zoom: f32_at(rec, 0xC0)?,
         });
     }
     Ok(out)

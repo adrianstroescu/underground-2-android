@@ -258,6 +258,8 @@ pub struct RaceInfo {
     /// See `TrackInfo::drift_kind` / `reversible`.
     pub drift_kind: u8,
     pub reversible: bool,
+    /// TRACKMAP calibration: world (x, y) of the image's top-left, its width, HUD zoom.
+    pub map: [f32; 4],
 }
 
 /// Every race of the career list whose region `available` says is installed, one per
@@ -308,6 +310,7 @@ pub fn race_catalog(global_b: &[u8], available: impl Fn(&str) -> bool) -> Vec<Ra
             location: info.location,
             drift_kind: info.drift_kind,
             reversible: info.reversible,
+            map: [info.map_upper_left[0], info.map_upper_left[1], info.map_width, info.map_zoom],
         });
     }
     out.sort_by_key(|r| (r.mode as u8, r.track, r.reverse));

@@ -32,6 +32,12 @@ pub struct ObjectState {
     pub tint: Option<[u8; 4]>,
     /// Size (x, y) replacing the scripted one.
     pub size: Option<[f32; 2]>,
+    /// Rotation about Z in degrees (speed2.exe 0x51ced0), replacing the scripted one.
+    pub rotation: Option<f32>,
+    /// Texture rectangle (u0, v0, u1, v1), as the game's UV keys 5 and 6 (0x5179d0).
+    pub uv: Option<[f32; 4]>,
+    /// Colour (R, G, B, A) replacing the scripted one (0x51d7f0).
+    pub color: Option<[u8; 4]>,
 }
 
 pub struct Scene {
@@ -73,7 +79,7 @@ impl Scene {
         let states = package
             .objects
             .iter()
-            .map(|_| ObjectState { script: INIT, time: 0.0, running: true, text: None, hidden: None, texture: None, position: None, tint: None, size: None })
+            .map(|_| ObjectState { script: INIT, time: 0.0, running: true, text: None, hidden: None, texture: None, position: None, tint: None, size: None, rotation: None, uv: None, color: None })
             .collect();
         Self { package, states, to_game: Vec::new(), active_button: None }
     }
@@ -205,6 +211,26 @@ impl Scene {
         if let Some([x, y]) = self.states[i].position {
             d[field::POSITION] = x;
             d[field::POSITION + 1] = y;
+        }
+        if let Some(deg) = self.states[i].rotation {
+            let half = deg.to_radians() * 0.5;
+            d[field::ROTATION] = 0.0;
+            d[field::ROTATION + 1] = 0.0;
+            d[field::ROTATION + 2] = half.sin();
+            d[field::ROTATION + 3] = half.cos();
+        }
+        if let Some([u0, v0, u1, v1]) = self.states[i].uv {
+            d[field::UV_TOP_LEFT] = u0;
+            d[field::UV_TOP_LEFT + 1] = v0;
+            d[field::UV_BOTTOM_RIGHT] = u1;
+            d[field::UV_BOTTOM_RIGHT + 1] = v1;
+        }
+        if let Some([r, g, b, a]) = self.states[i].color {
+            // B, G, R, A words.
+            d[0] = b as f32;
+            d[1] = g as f32;
+            d[2] = r as f32;
+            d[3] = a as f32;
         }
         if let Some([x, y]) = self.states[i].size {
             d[field::SIZE] = x;
