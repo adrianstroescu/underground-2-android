@@ -25,6 +25,8 @@ fn h(name: &str) -> u32 {
 
 /// What the HUD shows this frame.
 pub struct HudInput {
+    /// A race (position, laps, leaderboard); false in free roam.
+    pub race: bool,
     pub speed_ms: f32,
     /// Engine speed (rpm).
     pub rpm: f32,
@@ -200,6 +202,9 @@ impl RaceHud {
         }
         let lap = t.lap_time.map_or_else(|| strings.by_hash(0x61c9_b7a2).unwrap_or("--:--.--").to_string(), |x| race_time(x, false));
         self.set_text("CurrentLapTime", lap);
+        for n in ["POSITION", "PositionBacking", "BestTimeCounter", "LapLeftGroup", "LeaderBoardGroup"] {
+            self.show(n, t.race);
+        }
         self.leaderboard(t);
         self.countdown(t);
         self.show("WrongWayImage", t.wrong_way);

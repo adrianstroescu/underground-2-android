@@ -821,7 +821,11 @@ impl Game {
     /// drag, drift and Street X have their own packages, not done yet.
     fn original_hud(&self) -> bool {
         self.screen == Screen::Playing
-            && self.session.race().is_some_and(|r| matches!(r.def.info.mode, roads::Mode::Circuit | roads::Mode::Sprint | roads::Mode::Url))
+            && match self.session.race() {
+                Some(r) => matches!(r.def.info.mode, roads::Mode::Circuit | roads::Mode::Sprint | roads::Mode::Url),
+                // Free roam in Bayview: HUD_SingleRace with the explore map.
+                None => self.region == "L4RA",
+            }
     }
 
     fn update_race_hud(&mut self, dt: f32) {
@@ -835,9 +839,9 @@ impl Game {
             if !self.fe.open_race_hud() {
                 return;
             }
-            // The race's map.
-            if let (Some(r), Some(l)) = (self.session.race(), &self.loader) {
-                let t = r.def.info.track;
+            // The race's map (TRACKMAP4000 in free roam).
+            if let Some(l) = &self.loader {
+                let t = self.session.race().map_or(4000, |r| r.def.info.track);
                 if self.fe_requested.insert(bin_hash(&format!("TRACKMAP{t}"))) {
                     l.request(LoadRequest::TrackMap(t));
                 }
@@ -849,7 +853,7 @@ impl Game {
     }
 
     fn hud_input(&self) -> Option<fe_hud::HudInput> {
-        let r = self.session.race()?;
+        let Some(r) = self.session.race() else { return self.explore_hud_input() };
         let rh = self.race_hud()?;
         let p = &r.cars[0];
         let car = self.current_car();
@@ -880,6 +884,7 @@ impl Game {
         });
         let racing = rh.countdown.is_none();
         Some(fe_hud::HudInput {
+            race: true,
             speed_ms: self.vehicle.speed().abs(),
             rpm,
             redline,
@@ -898,6 +903,44 @@ impl Game {
             go_flash: rh.go_flash,
             wrong_way: rh.wrong_way,
             leaders,
+            map,
+        })
+    }
+
+    /// Free roam: gauges and the explore map (Explore Map Mode).
+    fn explore_hud_input(&self) -> Option<fe_hud::HudInput> {
+        let car = self.current_car();
+        let [idle, redline, max, turbo] = self.fe.data.as_ref().and_then(|d| d.engines.get(&car).copied()).unwrap_or([1000.0, 7000.0, 7500.0, 0.0]);
+        let rpm = idle + (max - idle) * ((self.vehicle.rpm - 0.18) / 0.82).clamp(0.0, 1.0);
+        let mode = self.cfg.options.get("explore_map").copied().unwrap_or(2.0);
+        let calib = self.fe.data.as_ref().and_then(|d| d.explore_map);
+        let map = calib.filter(|_| mode != 0.0).map(|calib| fe_hud::MapInput {
+            texture: bin_hash("TRACKMAP4000"),
+            calib,
+            rotate: mode == 2.0,
+            player: (self.vehicle.pos.x, self.vehicle.pos.y, self.vehicle.yaw),
+            others: Vec::new(),
+        });
+        Some(fe_hud::HudInput {
+            race: false,
+            speed_ms: self.vehicle.speed().abs(),
+            rpm,
+            redline,
+            max_rpm: max,
+            turbo: turbo != 0.0,
+            gear: self.vehicle.gear,
+            mph: self.hud.mph,
+            nitro: Some((self.vehicle.nitro, self.vehicle.nitro_on)),
+            place: 1,
+            racers: 1,
+            lap: 1,
+            laps: 1,
+            progress: None,
+            lap_time: None,
+            countdown: None,
+            go_flash: 0.0,
+            wrong_way: false,
+            leaders: Vec::new(),
             map,
         })
     }

@@ -769,6 +769,8 @@ pub struct FrontendData {
     pub ratings: HashMap<String, [f32; 3]>,
     /// Engine (idle, redline, max rpm, turbo 0/1) per car type, for the HUD.
     pub engines: HashMap<String, [f32; 4]>,
+    /// TRACKMAP4000 calibration (Bayview free roam, track 0xFA0).
+    pub explore_map: Option<[f32; 4]>,
 }
 
 /// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
@@ -841,8 +843,13 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     let mut cars = Vec::new();
     let mut ratings = HashMap::new();
     let mut engines = HashMap::new();
+    let mut explore_map = None;
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
         ratings = ug2_formats::carstats::car_ratings(&gb).into_iter().collect();
+        explore_map = ug2_formats::route::parse_track_infos(&gb)
+            .ok()
+            .and_then(|t| t.into_iter().find(|t| t.number == 4000))
+            .map(|t| [t.map_upper_left[0], t.map_upper_left[1], t.map_width, t.map_zoom]);
         // Screens that stay loaded (the PC help bar, dialogs) are in GLOBALB.
         let resident = ug2_formats::feng::packages(&gb);
         for p in &resident {
@@ -874,7 +881,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
     let textures = opaque.iter().map(|(h, _)| *h).collect();
     let _ = tx.send(LoadEvent::FeTextures(out, opaque));
-    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines })));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines, explore_map })));
     Ok(())
 }
 
