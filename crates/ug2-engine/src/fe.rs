@@ -42,6 +42,17 @@ pub enum FeAction {
     /// The help bar's Customize button (car select).
     CustomizeCar,
     /// Pause menu (speed2.exe 0x4c2bd2 race, 0x4c2902 free run).
+    /// Crib menu (UI_CareerCrib).
+    ExploreMode,
+    WorldMap,
+    CareerCarSelect,
+    ChangeParts,
+    PerformanceTuning,
+    ViewRewards,
+    SaveCareer,
+    CribQuit,
+    ConfirmCribQuit,
+    ConfirmExplore,
     /// Career menu (UI_StartCareer).
     ResumeCareer,
     NewCareer,
@@ -87,6 +98,7 @@ pub enum FeKind {
     PostRace,
     PostRaceStats,
     Credits,
+    Crib,
 }
 
 /// Credits.fng (speed2.exe 0x4b87b0): every line is a copy of CreditsArea running
@@ -314,6 +326,7 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::PostRaceResults => 0x5,
         FeKind::PostRaceStats => 0x404,
         FeKind::Credits => 0x401,
+        FeKind::Crib => 0x405,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -640,6 +653,23 @@ impl Frontend {
         s.apply(&data.strings);
         self.screen = Some(s);
         true
+    }
+
+    /// The crib menu (UI_CareerCrib, speed2.exe 0x4af820): World Map only from stage 2 on.
+    pub fn open_crib(&mut self, world_map: bool) -> bool {
+        let mut options = vec![opt(0xa230_cd88, 0x194e_fa7a, FeAction::ExploreMode)];
+        if world_map {
+            options.push(opt(0x22f2_ceab, 0x9c07_ca52, FeAction::WorldMap));
+        }
+        options.extend([
+            opt(0xa964_095b, 0x4518_79e2, FeAction::CareerCarSelect),
+            opt(0x511f_9d75, 0xabb2_4bbc, FeAction::ChangeParts),
+            opt(0x7a9b_397a, 0x8513_f2c0, FeAction::PerformanceTuning),
+            opt(0x49d2_e3de, 0xce62_c0bf, FeAction::ViewRewards),
+            opt(0x8ada_6fd4, 0x03ec_7395, FeAction::SaveCareer),
+            opt(0xfc39_853f, 0x046e_7d84, FeAction::CribQuit),
+        ]);
+        self.open_icon_menu("UI_CareerCrib.fng", FeKind::Crib, options)
     }
 
     /// The career menu (UI_StartCareer, speed2.exe 0x4af110): Resume Career when a

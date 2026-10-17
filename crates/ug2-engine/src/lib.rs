@@ -1138,6 +1138,13 @@ impl Game {
                 }
                 true
             }
+            Some(fe::FeKind::Crib) => {
+                // Back offers to quit to the main menu.
+                if !self.fe.open_dialog(0x30ed_2368, vec![(0x0639, fe::FeAction::ConfirmCribQuit), (0x5413_89e5, fe::FeAction::CloseDialog)]) {
+                    self.fe.open_main_menu();
+                }
+                true
+            }
             Some(fe::FeKind::StartCareer) => {
                 self.fe.open_main_menu();
                 true
@@ -1292,7 +1299,46 @@ impl Game {
                 }
                 return;
             }
-            fe::FeAction::ResumeCareer => frontend::Row::Career,
+            fe::FeAction::ResumeCareer => {
+                // Resume lands on the crib menu (speed2.exe 0x495a30).
+                if !self.fe.open_crib(true) {
+                    self.fe_go(frontend::Row::Career);
+                }
+                return;
+            }
+            fe::FeAction::ExploreMode => {
+                // "Return to Explore Mode?" then free roam.
+                if !self.fe.open_dialog(0x60b4_2afb, vec![(0x0639, fe::FeAction::ConfirmExplore), (0x5413_89e5, fe::FeAction::CloseDialog)]) {
+                    self.fe_go(frontend::Row::FreeRoam);
+                }
+                return;
+            }
+            fe::FeAction::ConfirmExplore => frontend::Row::FreeRoam,
+            fe::FeAction::WorldMap => frontend::Row::Career,
+            fe::FeAction::CareerCarSelect | fe::FeAction::ChangeParts => {
+                self.in_career = true;
+                frontend::Row::Garage
+            }
+            fe::FeAction::PerformanceTuning | fe::FeAction::ViewRewards => {
+                log::info!("{a:?} is not available yet");
+                return;
+            }
+            fe::FeAction::SaveCareer => {
+                if let Some(c) = &self.career {
+                    c.save();
+                }
+                return;
+            }
+            fe::FeAction::CribQuit => {
+                if !self.fe.open_dialog(0x30ed_2368, vec![(0x0639, fe::FeAction::ConfirmCribQuit), (0x5413_89e5, fe::FeAction::CloseDialog)]) {
+                    self.fe.open_main_menu();
+                }
+                return;
+            }
+            fe::FeAction::ConfirmCribQuit => {
+                self.fe.open_main_menu();
+                return;
+            }
             fe::FeAction::NewCareer => {
                 if self.career.as_ref().is_some_and(|c| !c.won.is_empty() || c.owned.len() > 1) {
                     // Starting over would erase the saved career: needs the game's
