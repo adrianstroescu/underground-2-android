@@ -46,6 +46,10 @@ pub enum FeAction {
     ResumeCareer,
     NewCareer,
     LoadGame,
+    /// Car select accepted, transmission chosen.
+    CarChosen,
+    TransmissionManual,
+    TransmissionAuto,
     /// A dialog's button that only closes it.
     CloseDialog,
     /// "Quit to Main Menu?" answered OK.

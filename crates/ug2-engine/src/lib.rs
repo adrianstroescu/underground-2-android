@@ -1122,6 +1122,30 @@ impl Game {
                 return;
             }
             fe::FeAction::CarDone => {
+                // "Transmission:" Manual / Auto when Ask for Transmission is on, except for
+                // drags (speed2.exe 0x497d50).
+                let ask = self.cfg.options.get("ask_transmission").copied().unwrap_or(1.0) != 0.0;
+                let drag = self.quick.chosen.as_ref().is_some_and(|r| r.mode == roads::Mode::Drag);
+                if ask && !drag && !self.fe.dialog_open() {
+                    let manual = self.cfg.options.get("transmission").copied().unwrap_or(0.0) != 0.0;
+                    let buttons = vec![(0x1b3a_2485, fe::FeAction::TransmissionManual), (0x61cb_0720, fe::FeAction::TransmissionAuto)];
+                    if self.fe.open_dialog(0x3000_3d27, buttons) {
+                        if !manual {
+                            self.fe.step(1);
+                        }
+                        return;
+                    }
+                }
+                self.fe_action(fe::FeAction::CarChosen);
+                return;
+            }
+            fe::FeAction::TransmissionManual | fe::FeAction::TransmissionAuto => {
+                let manual = a == fe::FeAction::TransmissionManual;
+                self.cfg.options.insert("transmission".into(), manual as u8 as f32);
+                self.fe_action(fe::FeAction::CarChosen);
+                return;
+            }
+            fe::FeAction::CarChosen => {
                 let Some(name) = self.fe.selected_car().map(str::to_string) else { return };
                 self.cfg.car = name.clone();
                 self.cfg.save(&self.config_path);
@@ -1191,8 +1215,12 @@ impl Game {
         // Event handling: drift events loosen the grip, drags have a manual gearbox.
         let race_mode = self.session.race().map(|r| r.def.info.mode);
         self.vehicle.drift_handling = race_mode == Some(RaceMode::Drift);
-        self.vehicle.manual = race_mode == Some(RaceMode::Drag);
-        self.hud.set_drag(self.vehicle.manual);
+        // Drags always shift by hand; elsewhere the Transmission option decides.
+        let drag = race_mode == Some(RaceMode::Drag);
+        let manual_choice = self.cfg.options.get("transmission").copied().unwrap_or(0.0) != 0.0;
+        self.vehicle.manual = drag || manual_choice;
+        self.hud.set_drag(drag);
+        self.hud.set_manual(manual_choice && !drag);
         if let Some((_, _, t)) = &mut self.banner {
             *t -= dt;
             if *t <= 0.0 {

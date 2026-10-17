@@ -377,6 +377,8 @@ pub struct Hud {
     pub touch_seen: bool,
     /// Drag race layout: shift buttons instead of brake and handbrake.
     drag: bool,
+    /// Manual gearbox outside drags: shift buttons beside the pedals.
+    manual: bool,
 }
 
 const ACCENT: Rgba = [0.25, 0.85, 1.0, 1.0];
@@ -397,10 +399,18 @@ impl Hud {
             triggers: Vec::new(),
             touch_seen: false,
             drag: false,
+            manual: false,
         }
     }
 
     /// Switches to the drag race controls (or back).
+    pub fn set_manual(&mut self, manual: bool) {
+        if self.manual != manual {
+            self.manual = manual;
+            self.layout(self.size.x, self.size.y, self.dp);
+        }
+    }
+
     pub fn set_drag(&mut self, drag: bool) {
         if self.drag != drag {
             self.drag = drag;
@@ -432,6 +442,12 @@ impl Hud {
         } else {
             b.push(ButtonDef::pedal(Button::Brake, vec2(w - 176.0 * s, h - 74.0 * s), vec2(36.0, 46.0) * s));
             b.push(ButtonDef::circle(Button::Handbrake, vec2(64.0 * s, h - 192.0 * s), 28.0 * s));
+            if self.manual {
+                // Manual gearbox (Options > Player > Transmission): up above the gas, down
+                // beside it.
+                b.push(ButtonDef::circle(Button::ShiftUp, vec2(w - 74.0 * s, h - 236.0 * s), 28.0 * s));
+                b.push(ButtonDef::circle(Button::ShiftDown, vec2(w - 120.0 * s, h - 296.0 * s), 22.0 * s));
+            }
         }
         if self.steer_mode == SteerMode::Buttons {
             // Side by side, bottom left; the touch zones (1.2 x radius) meet in the middle
