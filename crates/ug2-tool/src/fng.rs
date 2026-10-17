@@ -27,7 +27,15 @@ fn read_original(game: &GameDir, rel: &str) -> Result<Vec<u8>> {
 pub fn render(game_dir: &str, name: &str, out: &Path, ms: Option<f32>) -> Result<()> {
     let game = GameDir::new(game_dir);
     let front = decompress(&read_original(&game, "FRONTEND/FrontB.lzc")?)?.into_owned();
-    let pkgs = packages(&front);
+    let mut pkgs = packages(&front);
+    // In-game screens (pause, HUD, dialogs) are in GLOBAL/InGame*.bun.
+    let mut ingame = Vec::new();
+    for f in ["InGameCommon", "InGameRace", "InGameDrag", "InGameDrift", "InGameFreeRoam", "InGamePerformanceTuning"] {
+        if let Ok(d) = game.read(&format!("GLOBAL/{f}.bun")) {
+            pkgs.extend(packages(&d));
+            ingame.push(d);
+        }
+    }
     let pkg = pkgs.into_iter().find(|p| p.name.eq_ignore_ascii_case(name)).context("no such package")?;
     let lang = read_original(&game, "LANGUAGES/English.bin")?;
     let strings = Strings::parse(&lang);
@@ -39,7 +47,7 @@ pub fn render(game_dir: &str, name: &str, out: &Path, ms: Option<f32>) -> Result
     let mut textures: HashMap<u32, Image> = HashMap::new();
     let langtex = game.read("LANGUAGES/LanguageTextures.bin").unwrap_or_default();
     let globalb = game.read("GLOBAL/GLOBALB.BUN").unwrap_or_default();
-    for file in [&front, &globalb, &globala, &langtex] {
+    for file in [&front, &globalb, &globala, &langtex].into_iter().chain(ingame.iter()) {
         for p in find_tpks(file) {
             for t in &p.textures {
                 if let Some((w, h, rgba)) = t.level_rgba8(0) {

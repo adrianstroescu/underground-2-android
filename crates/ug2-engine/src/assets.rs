@@ -765,6 +765,8 @@ pub struct FrontendData {
     pub textures: HashSet<u32>,
     /// Racer car types in GLOBALB order: (name, manufacturer).
     pub cars: Vec<(String, String)>,
+    /// Car select stat bars (acceleration, top speed, handling) per car type.
+    pub ratings: HashMap<String, [f32; 3]>,
 }
 
 /// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
@@ -806,7 +808,9 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         p.textures.iter().for_each(|t| take(t, &mut out));
     }
     let mut cars = Vec::new();
+    let mut ratings = HashMap::new();
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
+        ratings = ug2_formats::carstats::car_ratings(&gb).into_iter().collect();
         if let Ok(types) = ug2_formats::carinfo::parse_car_types(&gb) {
             cars = types
                 .iter()
@@ -825,7 +829,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
     let textures = opaque.iter().map(|(h, _)| *h).collect();
     let _ = tx.send(LoadEvent::FeTextures(out, opaque));
-    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars })));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings })));
     Ok(())
 }
 

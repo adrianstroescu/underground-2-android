@@ -8,6 +8,7 @@ pub mod audio;
 pub mod bytes;
 pub mod car;
 pub mod carinfo;
+pub mod carstats;
 pub mod chunk;
 pub mod collision;
 pub mod compression;

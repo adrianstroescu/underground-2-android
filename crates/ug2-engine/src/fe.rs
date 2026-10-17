@@ -392,7 +392,7 @@ impl Frontend {
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
         let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, car: Some(car) };
         s.apply(&data.strings);
-        s.apply_car(&data.strings, &data.textures);
+        s.apply_car(data);
         self.screen = Some(s);
         true
     }
@@ -529,7 +529,7 @@ impl Frontend {
         let d = target - s.menu.scroll;
         s.menu.scroll = if d.abs() <= step { target } else { s.menu.scroll + d.signum() * step.max(d.abs() * dt * 8.0) };
         s.apply(&data.strings);
-        s.apply_car(&data.strings, &data.textures);
+        s.apply_car(data);
     }
 
     /// Steps the selection (left / right); on a list screen, changes the highlighted
@@ -848,7 +848,8 @@ impl FeScreen {
     /// Car select (speed2.exe 0x511e60 / 0x4b2310): the logo is
     /// CARSELECT_MANUFACTURER_<make>, the name badge SECONDARY_LOGO_<car type>
     /// (GENERICPLACEHOLDER when missing); the end arrows hide at the ends of the list.
-    fn apply_car(&mut self, strings: &ug2_formats::lang::Strings, textures: &std::collections::HashSet<u32>) {
+    fn apply_car(&mut self, data: &FrontendData) {
+        let (strings, textures) = (&data.strings, &data.textures);
         let Some(c) = &self.car else { return };
         let Some((name, make)) = c.cars.get(c.selected) else { return };
         let tex = |n: String| {
@@ -872,6 +873,26 @@ impl FeScreen {
         }
         if let Some(i) = self.scene.index_of(h("RaceMode_DATA")) {
             self.scene.states[i].text = strings.by_hash(c.mode_label).map(str::to_string);
+        }
+        // Stat bars (speed2.exe 0x497cd0, sliders 0x497bf0 / 0x540e90): the track is the
+        // backing less a 46-unit margin each side; the bar is value × track × 0.95 and the
+        // handle sits 7 past its end. The game's axis runs the other way; on screen the
+        // bars grow to the right.
+        let rating = data.ratings.get(name).copied().unwrap_or([0.03; 3]);
+        for (k, part) in ["accel", "top_speed", "handling"].into_iter().enumerate() {
+            let find = |s: &str| self.scene.index_of(h(&format!("{part}_{s}")));
+            let (Some(back), Some(cur), Some(handle)) = (find("backing"), find("cur"), find("handle")) else { continue };
+            let b = self.scene.package.objects[back].data;
+            let track = b[14] - 92.0;
+            let start = b[7] - track * 0.5;
+            let w = rating[k] * track * 0.95;
+            let hx = start + w + 7.0;
+            let cd = self.scene.package.objects[cur].data;
+            let hd = self.scene.package.objects[handle].data;
+            let st = &mut self.scene.states;
+            st[handle].position = Some([hx, hd[8]]);
+            st[cur].position = Some([start + w * 0.5, cd[8]]);
+            st[cur].size = Some([w, cd[15]]);
         }
         let n = c.cars.len();
         for (k, hidden) in [(0, c.selected == 0), (1, c.selected + 1 >= n)] {

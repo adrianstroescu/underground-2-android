@@ -288,6 +288,22 @@ shares the scene depth. Per frame, in this order:
   - Track select: the district icon comes from track record +0x7C (`0x4984b0`); names
     are TRACK_NAME_%d / REVERSE_TRACK_NAME_%d; the map is TRACKMAP%d from
     `TRACKS/TRACKMAP<n>.BIN`.
+- Quick race Game Options (`UI_QRModeOptions`, ctor `0x4fa550`): generic option list
+  `0x552780`. Rows are laid out from the TITLE_MASTER / DATA_MASTER rectangles (their
+  own data, before scripts), one title height (36) apart, 7 visible
+  (`0x51ff80`, `0x54ef30`, `0x52d800`). Rows per mode: `0x4ccf60` and the following
+  builders. The settings record is one per mode at `0x83aac4 + 20·mode`, with defaults
+  from `0x52a220`. On PC the button bar is ConsoleOnly (flag 0x40): a click on the
+  highlighted row's name accepts.
+- Quick race Car Select (`UI_QRCarSelect`, ctor `0x4f9d90`):
+  - logo CARSELECT_MANUFACTURER_<record +0xC0>, badge SECONDARY_LOGO_<car type>
+    (`0x511e60`);
+  - locked cars are left out; the starter set is at `0x7f7c08`;
+  - filters (`0x4eed10`): All Cars, Stock Cars, My Cars, Career, Sponsor Cars.
+  - Stat bars: `ug2-formats/carstats.rs` (accel `0x5b53a0`, top speed `0x5b6a20`,
+    handling `0x5b5490`, range table GLOBALB chunk 0x34a32). Bars are value × (backing
+    − 92) × 0.95 (`0x540e90`).
+- In-game screens (UI_Pause, HUD_*, dialogs) are FEng packages in `GLOBAL/InGame*.bun`.
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
