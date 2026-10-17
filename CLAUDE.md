@@ -259,6 +259,54 @@ shares the scene depth. Per frame, in this order:
   - TintColor = (156, 160, 145)/255 × 0.2, with w = 0.19 = f6, so b = 1.
   - Fog start is 10 and max 0.4, as captured.
 
+### Frontend (FEng), movies, fonts
+
+- The owner's install has mods (Dec 2024) in `FRONTEND/FrontB.lzc`, `GLOBAL/GlobalB.lzc`,
+  `LANGUAGES/English.bin` and `*MemoryFile.bin`. The `.bak` files next to them are the
+  2004 originals: read those first (`GameDir::read_original`).
+- **FEng packages** (`ug2-formats/feng.rs`; spec from NFSTools/FEngLib, which has no
+  licence, so it is used as documentation only):
+  - `FrontB.lzc`: chunks 0x30210 of u32 hash + a JDLZ/HUFF-compressed package.
+  - Package chunks: PkHd, Res (RsNm/RsRq), Obj (Butn, FObê with ObjD tags, Scrp,
+    MsgR), PkgR, Targ.
+  - Script tracks are word offsets into the object state: colour 0 (BGRA as i32),
+    pivot 4, position 7, rotation 10, size 14, UV 17/19. Each has a base key
+    (time −1) and delta keys, in ms.
+  - Messages are `bin_hash(upper(name))`. Response commands: 0 SetScript,
+    1 PostToFEng, 2 PostToGame, 0x100 SetActiveButton, and If/Else/EndIf.
+  - The virtual screen is 640×480 with the origin at the centre. Larger z draws first.
+    Send CALL PACKAGE and CALL FRAMES on open, or only the INIT objects show.
+  - The FE shader is `2·tex·vc`, blended SRCALPHA/INVSRCALPHA. TPK blend type 2 is
+    additive (icons) and 5 is opaque (the track maps have alpha 0).
+  - Textures are looked up by name hash, because TPK names are cut at 24 characters.
+    They come from FrontB and GLOBALB.
+- Screen factory table at `0x7f8570` in speed2.exe, 7 dwords per entry (package,
+  constructor, hash, flags...). Quick race flow (`0x7f445c`): ModeSelect →
+  ModeOptions → TrackSelect → CarSelect.
+  - Main menu options are built at `0x4aee40`, quick race modes at `0x4b2d80`, the
+    IconScroller at `0x543a90`/`0x543c10` (spacing = width + 40).
+  - Track select: the district icon comes from track record +0x7C (`0x4984b0`); names
+    are TRACK_NAME_%d / REVERSE_TRACK_NAME_%d; the map is TRACKMAP%d from
+    `TRACKS/TRACKMAP<n>.BIN`.
+- **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
+  offset; entries are (bin_hash(label), offset)).
+- **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
+  in `LANGUAGES/LanguageTextures.bin` and GLOBALA (e.g. TT21I). Glyph record: x offset
+  at byte 9, y offset at 10, advance at 14 (`ug2-formats/font.rs`).
+- **Movies** (`MOVIES/*.vp6`, `ug2-formats/movie.rs`, `crates/ug2-movie`):
+  - EA container: MVhd (width/height at 12/14, frames at 16, rate den/num at 24/28),
+    then MV0K/MV0F frames. Pictures are stored bottom-up.
+  - Sound: SCHl with a "GSTR" header (tags from +8), big-endian EA-XA v2 SCDl blocks
+    with no history pair, 32 kHz stereo.
+  - VP6 is decoded with nihav-vp6 (ruffle-rs fork, MIT). It takes 7.4 ms per frame on
+    a Galaxy S9+.
+  - Boot order: ealogo, THX_logo, FMVOpening. A tap skips.
+- **Showroom** (`FRONTEND/PLATFORMS/Showroom.BIN`): 6 solids (DISC01–03,
+  BACKDROP, BACKDROP_FLOOR, PLATFORMBASE), each placed by its own matrix.
+  - Camera: eye (0, −4, 1.4), direction (0, 0.999922, −0.012462), vertical FOV 29.2°.
+  - Fog: black, from 0 to 250 m, at most 0.4.
+  - The car sits on disc 1 at (0, 5.44, 0.1697), yaw −54.2°, with no glows.
+
 ### Car shading in the port
 
 - `ug2-formats/material.rs` parses the light materials. They are checked against the
