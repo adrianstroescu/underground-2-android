@@ -33,7 +33,48 @@ pub enum HudKind {
     ShortTrack,
     /// HUD_Drag.
     Drag,
+    /// HUD_Drift.
+    Drift,
 }
+
+/// Drift scoring shown by HUD_Drift (0x4da590, 0x4c85d0).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DriftInput {
+    pub total: u32,
+    /// Points of the drift in progress (0 when none).
+    pub pending: u32,
+    pub multiplier: u32,
+    pub best: u32,
+    /// Banked drifts so far and the last one's points.
+    pub banks: u32,
+    pub last_bank: u32,
+    /// Slip angle in degrees.
+    pub angle: f32,
+}
+
+/// "%$d": thousands separated by commas.
+fn thousands(n: u32) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (k, c) in s.chars().enumerate() {
+        if k > 0 && (s.len() - k) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Comment_DATA after a drift: thresholds from GLOBALB chunk 0x34a07.
+const DRIFT_COMMENTS: [(u32, u32); 7] = [
+    (100_000, 0x670b_90d0),
+    (50_000, 0xecd6_4585),
+    (20_000, 0xb927_8dd5),
+    (15_000, 0x77d4_05a2),
+    (7_000, 0x0bcb_8df8),
+    (3_000, 0x68df_0cfa),
+    (1_000, 0x1d10_73f0),
+];
 
 impl HudKind {
     pub fn package(self) -> &'static str {
@@ -41,6 +82,7 @@ impl HudKind {
             HudKind::Single => "HUD_SingleRace.fng",
             HudKind::ShortTrack => "HUD_Short_Track.fng",
             HudKind::Drag => "HUD_Drag.fng",
+            HudKind::Drift => "HUD_Drift.fng",
         }
     }
 
@@ -67,6 +109,30 @@ impl HudKind {
                 "Lap_Time_Title",
                 "WrongWayImage",
             ],
+            HudKind::Drift => &[
+                "GaugeCluster",
+                "Drift_Angle_Backing3",
+                "POSITION",
+                "PositionBacking",
+                "LapCounterBacking_1",
+                "NumberLaps",
+                "LapNumber",
+                "LapText",
+                "Track2000_map",
+                "Minimap_Mask",
+                "TrackMapTargetRing",
+                "321_Go",
+                "BestTimeCounter",
+                "StylePointsGroup",
+                "StylePointsGroup_1",
+                "TotalPointsGroup",
+                "BestDriftCounter",
+                "SP_Drift_Point",
+                "SP_Drift_Title",
+                "Comment_DATA",
+                "LeaderBoardGroup",
+                "Leader_bottom",
+            ],
             HudKind::Drag => &[
                 "GaugeCluster",
                 "Group",
@@ -88,6 +154,7 @@ impl HudKind {
 pub struct HudInput {
     /// A race (position, laps, leaderboard); false in free roam.
     pub race: bool,
+    pub drift: Option<DriftInput>,
     /// Race clock (s), drag heat 0..1, and the last shift message (label, serial).
     pub race_time: f32,
     pub heat: f32,
@@ -133,6 +200,10 @@ pub struct MapInput {
 pub struct RaceHud {
     pub scene: Scene,
     pub kind: HudKind,
+    /// Drift HUD: banks seen, seconds since the last bank and since the drift ended.
+    banks_seen: u32,
+    comment_time: f32,
+    drift_idle: f32,
     shown: Vec<u32>,
     shift_serial: u32,
     shift_time: f32,
@@ -187,20 +258,20 @@ impl RaceHud {
             let on = shown.contains(&o.hash) || backing;
             scene.states[i].hidden = Some(!on);
         }
-        for n in ["Lap_Time_Text", "Lap_Time_Title", "WrongWayImage", "321_Go", "Shift_light", "ShiftMessage"] {
+        for n in ["Lap_Time_Text", "Lap_Time_Title", "WrongWayImage", "321_Go", "Shift_light", "ShiftMessage", "Comment_DATA", "SP_Drift_Point", "SP_Drift_Title"] {
             if let Some(i) = scene.index_of(h(n)) {
                 scene.states[i].hidden = Some(true);
             }
         }
         let map_object = scene.index_of(h("Track2000_map"));
-        RaceHud { scene, kind, shown, shift_serial: 0, shift_time: 0.0, map_object, wide: 0.0, time: 0.0, dial: None }
+        RaceHud { scene, kind, banks_seen: 0, comment_time: 9.0, drift_idle: 9.0, shown, shift_serial: 0, shift_time: 0.0, map_object, wide: 0.0, time: 0.0, dial: None }
     }
 
     /// Touch layout: the gauge cluster rises above the pedals and the minimap moves to
     /// the top left (the owner's HUD design, docs/hud-target.png); side groups follow
     /// the screen edges.
     fn offset(&self, name_hash: u32, x: f32) -> [f32; 2] {
-        let gauge = [h("GaugeCluster"), h("Group")];
+        let gauge = [h("GaugeCluster"), h("Group"), h("Drift_Angle_Backing3")];
         let map = [h("Track2000_map"), h("Minimap_Mask"), h("TrackMapTargetRing"), h("Minimap_North_indicator"), h("PlayerCarIndicator_1")];
         let dx = if x > 0.0 { self.wide } else { -self.wide };
         if self.kind == HudKind::Drag {
@@ -224,7 +295,7 @@ impl RaceHud {
             self.scene.states[i].position = Some([x, y]);
             // The gauge cluster is drawn at 0.8 so it fits between the leaderboard and
             // the pedals.
-            if self.kind != HudKind::Drag && [h("GaugeCluster"), h("Group")].contains(&o.hash) {
+            if self.kind != HudKind::Drag && [h("GaugeCluster"), h("Group"), h("Drift_Angle_Backing3")].contains(&o.hash) {
                 self.scene.states[i].size = Some([0.8, 0.8]);
             }
         }
@@ -250,6 +321,9 @@ impl RaceHud {
             self.drag(t, strings, textures, dt);
         } else {
             self.tachometer(t, strings, textures);
+        }
+        if let Some(d) = t.drift {
+            self.drift(&d, strings, dt);
         }
         // Race position: "%d", the suffix, "/%d".
         let suffix = match t.place % 10 {
@@ -458,6 +532,39 @@ impl RaceHud {
             Some((v, _)) if v > 0.0 => self.show("nos_line", true),
             _ => self.show("nos_line", false),
         }
+    }
+
+    /// Drift scoring (0x4da590 gauge, 0x4c85d0 scores).
+    fn drift(&mut self, d: &DriftInput, strings: &Strings, dt: f32) {
+        self.set_text("Angle_Indicator_DATA", format!("{}", d.angle.abs().min(90.0) as i32));
+        // The drift in progress: "DRIFT" and its points, hidden 1 s after it ends.
+        if d.pending > 0 {
+            self.drift_idle = 0.0;
+            self.set_text("SP_Drift_Point", thousands(d.pending));
+            if let Some(t) = strings.by_hash(0xa46a_aea8) {
+                self.set_text("SP_Drift_Title", t.to_string());
+            }
+        } else {
+            self.drift_idle += dt;
+        }
+        let live = self.drift_idle < 1.0;
+        self.show("SP_Drift_Point", live);
+        self.show("SP_Drift_Title", live);
+        self.set_text("SP_DRIFT_TOTAL", thousands(d.total));
+        self.set_text("BestDrift", thousands(d.best));
+        self.set_text("drift_multiplier_text", format!("X{}", d.multiplier));
+        // A banked drift's comment, shown 2 s.
+        if d.banks != self.banks_seen {
+            self.banks_seen = d.banks;
+            if let Some(&(_, label)) = DRIFT_COMMENTS.iter().find(|(t, _)| d.last_bank >= *t) {
+                self.comment_time = 0.0;
+                if let Some(c) = strings.by_hash(label) {
+                    self.set_text("Comment_DATA", c.to_string());
+                }
+            }
+        }
+        self.comment_time += dt;
+        self.show("Comment_DATA", self.comment_time < 2.0);
     }
 
     fn leaderboard(&mut self, t: &HudInput) {

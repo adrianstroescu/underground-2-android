@@ -24,11 +24,15 @@ pub struct DriftScore {
     since_bank: f32,
     /// Last event for the HUD ("+1250", "CRASH") and seconds left to show it.
     pub flash: Option<(String, f32)>,
+    /// Best single drift, banked drifts so far and the last one's points (the HUD).
+    pub best: u32,
+    pub banks: u32,
+    pub last_bank: u32,
 }
 
 impl Default for DriftScore {
     fn default() -> Self {
-        Self { total: 0, current: 0.0, multiplier: 1, settle: 0.0, since_bank: 0.0, flash: None }
+        Self { total: 0, current: 0.0, multiplier: 1, settle: 0.0, since_bank: 0.0, flash: None, best: 0, banks: 0, last_bank: 0 }
     }
 }
 
@@ -69,6 +73,9 @@ impl DriftScore {
     fn bank(&mut self) {
         let points = (self.current * self.multiplier as f32) as u32;
         self.total += points;
+        self.best = self.best.max(points);
+        self.banks += 1;
+        self.last_bank = points;
         self.flash = Some((format!("+{points}"), 1.5));
         if self.current > 250.0 {
             self.multiplier = (self.multiplier + 1).min(MAX_MULTIPLIER);

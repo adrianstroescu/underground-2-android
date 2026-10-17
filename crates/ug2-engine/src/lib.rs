@@ -836,7 +836,7 @@ impl Game {
             Some(roads::Mode::Circuit | roads::Mode::Sprint | roads::Mode::Url) => Some(fe_hud::HudKind::Single),
             Some(roads::Mode::StreetX) => Some(fe_hud::HudKind::ShortTrack),
             Some(roads::Mode::Drag) => Some(fe_hud::HudKind::Drag),
-            Some(roads::Mode::Drift) => None,
+            Some(roads::Mode::Drift) => Some(fe_hud::HudKind::Drift),
             None => (self.region == "L4RA").then_some(fe_hud::HudKind::Single),
         }
     }
@@ -909,8 +909,18 @@ impl Game {
             };
             (label, serial)
         });
+        let drift = r.drift.as_ref().map(|d| fe_hud::DriftInput {
+            total: d.score.total,
+            pending: d.score.pending(),
+            multiplier: d.score.multiplier,
+            best: d.score.best,
+            banks: d.score.banks,
+            last_bank: d.score.last_bank,
+            angle: self.vehicle.drift_angle().to_degrees(),
+        });
         Some(fe_hud::HudInput {
             race: true,
+            drift,
             race_time: r.time,
             heat: self.vehicle.heat,
             shift_message,
@@ -952,6 +962,7 @@ impl Game {
         });
         Some(fe_hud::HudInput {
             race: false,
+            drift: None,
             race_time: 0.0,
             heat: 0.0,
             shift_message: None,
