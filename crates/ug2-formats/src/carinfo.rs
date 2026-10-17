@@ -75,6 +75,8 @@ pub struct CarTypeInfo {
     pub wheels: [WheelInfo; 4],
     pub usage: CarUsage,
     pub drivetrain: Drivetrain,
+    /// The record's physics data in the game's units (see `carphysics`).
+    pub physics: crate::carphysics::CarPhysics,
 }
 
 pub fn parse_car_types(global_b: &[u8]) -> Result<Vec<CarTypeInfo>> {
@@ -118,7 +120,7 @@ pub fn parse_car_types(global_b: &[u8]) -> Result<Vec<CarTypeInfo>> {
         for i in 0..9 {
             d.turbo[i] = f(0x334 + 4 * i)? * 1000.0;
         }
-        out.push(CarTypeInfo { name: cstr_at(rec, 0, 32)?, manufacturer: cstr_at(rec, 0xC0, 32)?, wheels, usage, drivetrain: d });
+        out.push(CarTypeInfo { name: cstr_at(rec, 0, 32)?, manufacturer: cstr_at(rec, 0xC0, 32)?, wheels, usage, drivetrain: d, physics: crate::carphysics::CarPhysics::parse(rec)? });
     }
     Ok(out)
 }

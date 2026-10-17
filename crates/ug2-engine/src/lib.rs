@@ -23,6 +23,7 @@ pub mod menu;
 
 pub mod play;
 pub mod post;
+pub mod powertrain;
 pub mod race;
 pub mod render;
 pub mod roads;

@@ -9,6 +9,7 @@ pub mod bytes;
 pub mod car;
 pub mod career;
 pub mod carinfo;
+pub mod carphysics;
 pub mod carstats;
 pub mod chunk;
 pub mod collision;
