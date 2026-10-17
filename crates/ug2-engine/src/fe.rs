@@ -46,6 +46,10 @@ pub enum FeAction {
     ResumeCareer,
     NewCareer,
     LoadGame,
+    /// A dialog's button that only closes it.
+    CloseDialog,
+    /// "Quit to Main Menu?" answered OK.
+    ConfirmQuit,
     /// Online / LAN play (no network game here).
     Online,
     ProfileManager,
@@ -179,6 +183,17 @@ pub struct Frontend {
     pub screen: Option<FeScreen>,
     /// The PC help bar (UI_PC_Help_Bar, in GLOBALB) under every screen.
     help: Option<HelpBar>,
+    /// A dialog over the screen (GenericDialog_*, speed2.exe 0x558790).
+    dialog: Option<Dialog>,
+}
+
+/// A generic dialog: the message in `message_blurb`, one to three buttons (two: left
+/// and right; one: the middle one).
+struct Dialog {
+    scene: Scene,
+    /// (button group, button text, action).
+    buttons: Vec<(usize, usize, FeAction)>,
+    selected: usize,
 }
 
 /// The PC help bar: up to six buttons, filled in the order of the screen's flag bits
@@ -358,6 +373,50 @@ impl Frontend {
             qr_constrain(l);
         }
         ok
+    }
+
+    /// Opens a dialog with `message` (label hash) and buttons (label hash, action).
+    pub fn open_dialog(&mut self, message: u32, buttons: Vec<(u32, FeAction)>) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("GenericDialog_SMALL.fng")) else { return false };
+        let mut scene = Scene::new(pkg.clone());
+        scene.advance(1.0);
+        scene.send_named("CALL PACKAGE");
+        scene.send_named("CALL FRAMES");
+        let find = |s: &Scene, n: &str| s.index_of(h(n));
+        if let Some(i) = find(&scene, "message_blurb") {
+            scene.states[i].text = data.strings.by_hash(message).map(str::to_string);
+        }
+        // The memory card title and icon belong to the save dialogs.
+        for n in ["Header_text_02", "U2_Save_Icon", "_EVENT_HANDLER_"] {
+            if let Some(i) = find(&scene, n) {
+                scene.states[i].hidden = Some(true);
+            }
+        }
+        // (group, text) slots: left, right, middle.
+        let slots = [(find(&scene, "button1"), scene.index_of(0xda47_3d2f)), (find(&scene, "button2"), scene.index_of(0xda47_3d30)), (find(&scene, "button3"), scene.index_of(0xda47_3d31))];
+        let used: Vec<usize> = if buttons.len() == 1 { vec![2] } else { vec![0, 1, 2].into_iter().take(buttons.len()).collect() };
+        let mut list = Vec::new();
+        for (k, &(g, t)) in slots.iter().enumerate() {
+            let on = used.contains(&k);
+            for i in [g, t].into_iter().flatten() {
+                scene.states[i].hidden = Some(!on);
+            }
+        }
+        for (&slot, &(label, action)) in used.iter().zip(&buttons) {
+            if let (Some(g), Some(t)) = slots[slot] {
+                scene.states[t].text = data.strings.by_hash(label).map(str::to_string);
+                list.push((g, t, action));
+            }
+        }
+        let mut d = Dialog { scene, buttons: list, selected: 0 };
+        d.highlight(true);
+        self.dialog = Some(d);
+        true
+    }
+
+    pub fn dialog_open(&self) -> bool {
+        self.dialog.is_some()
     }
 
     /// The career menu (UI_StartCareer, speed2.exe 0x4af110): Resume Career when a
@@ -698,7 +757,13 @@ impl Frontend {
         true
     }
 
+    /// Back closes a dialog (as its cancel button).
+    pub fn close_dialog(&mut self) -> bool {
+        self.dialog.take().is_some()
+    }
+
     pub fn close(&mut self) {
+        self.dialog = None;
         self.screen = None;
     }
 
@@ -716,6 +781,9 @@ impl Frontend {
                 scene.send_named("CALL PACKAGE");
                 HelpBar { scene, buttons: Vec::new(), flags: u32::MAX }
             });
+        }
+        if let Some(d) = &mut self.dialog {
+            d.scene.advance(dt * 1000.0);
         }
         if let Some(hb) = &mut self.help {
             hb.scene.advance(dt * 1000.0);
@@ -735,6 +803,16 @@ impl Frontend {
     /// Steps the selection (left / right); on a list screen, changes the highlighted
     /// row's value. True when something moved.
     pub fn step(&mut self, delta: i32) -> bool {
+        if let Some(d) = &mut self.dialog {
+            let n = d.buttons.len() as i32;
+            let next = (d.selected as i32 + delta).clamp(0, n - 1) as usize;
+            if next != d.selected {
+                d.highlight(false);
+                d.selected = next;
+                d.highlight(true);
+            }
+            return true;
+        }
         let Some(s) = &mut self.screen else { return false };
         if let Some(c) = &mut s.car {
             // No wrap (speed2.exe 0x4e2590).
@@ -769,7 +847,10 @@ impl Frontend {
         true
     }
 
-    pub fn activate(&self) -> Option<FeAction> {
+    pub fn activate(&mut self) -> Option<FeAction> {
+        if let Some(d) = self.dialog.take() {
+            return d.buttons.get(d.selected).map(|b| b.2).filter(|a| *a != FeAction::CloseDialog);
+        }
         let s = self.screen.as_ref()?;
         if let Some(l) = &s.list {
             return match s.list_kind {
@@ -787,6 +868,18 @@ impl Frontend {
     /// already selected, activated).
     pub fn tap(&mut self, x: f32, y: f32, size: (u32, u32)) -> Option<FeAction> {
         let (vx, vy) = to_virtual(x, y, size);
+        if let Some(d) = &mut self.dialog {
+            let hit = d.buttons.iter().position(|&(g, _, _)| {
+                let v = d.scene.values(g);
+                // The buttons' boxes are 214 × 42.
+                (vx - 320.0 - v[7]).abs() <= 107.0 && (vy - 240.0 - v[8]).abs() <= 21.0
+            });
+            let a = hit.map(|k| d.buttons[k].2);
+            if a.is_some() {
+                self.dialog = None;
+            }
+            return a.filter(|a| *a != FeAction::CloseDialog);
+        }
         if let Some(bit) = self.help.as_ref().and_then(|hb| hb.hit(vx, vy)) {
             return match bit {
                 0x1 => Some(FeAction::Quit),
@@ -876,6 +969,9 @@ impl Frontend {
         let mut quads = s.scene.layout(&data.strings, &data.fonts);
         if let Some(hb) = &self.help {
             quads.extend(hb.scene.layout(&data.strings, &data.fonts));
+        }
+        if let Some(d) = &self.dialog {
+            quads.extend(d.scene.layout(&data.strings, &data.fonts));
         }
         let (scale, ox) = mapping(size);
         for q in &quads {
@@ -1067,5 +1163,15 @@ impl HelpBar {
             let inside = (vx - 320.0 - d[7]).abs() <= d[14] * 0.5 && (vy - 240.0 - d[8]).abs() <= d[15] * 0.5 + 2.0;
             inside.then_some(bit)
         })
+    }
+}
+
+impl Dialog {
+    /// The highlighted button plays Highlight; its text turns the highlight green.
+    fn highlight(&mut self, on: bool) {
+        let Some(&(g, t, _)) = self.buttons.get(self.selected) else { return };
+        self.scene.set_script(g, h(if on { "Highlight" } else { "UNHIGHLIGHT" }));
+        self.scene.states[t].tint = None;
+        let _ = t;
     }
 }

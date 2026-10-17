@@ -849,6 +849,9 @@ impl Game {
 
     /// Back on an original screen: up one level; false at the main menu.
     fn fe_back(&mut self) -> bool {
+        if self.fe.close_dialog() {
+            return true;
+        }
         match self.fe.kind() {
             Some(fe::FeKind::QuickRaceMode) => {
                 self.fe.open_main_menu();
@@ -1044,9 +1047,17 @@ impl Game {
                 return;
             }
             fe::FeAction::QuitToMenu => {
+                // "Quit to Main Menu?" OK / Cancel (speed2.exe 0x4c28c5).
+                if !self.fe.open_dialog(0x30ed_2368, vec![(0x0639, fe::FeAction::ConfirmQuit), (0x5413_89e5, fe::FeAction::CloseDialog)]) {
+                    self.fe_row(frontend::Row::QuitToMenu);
+                }
+                return;
+            }
+            fe::FeAction::ConfirmQuit => {
                 self.fe_row(frontend::Row::QuitToMenu);
                 return;
             }
+            fe::FeAction::CloseDialog => return,
             fe::FeAction::PauseOptions => {
                 self.fe.open_pause_options_main();
                 return;
