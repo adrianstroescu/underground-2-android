@@ -412,6 +412,26 @@ shares the scene depth. Per frame, in this order:
   (1 + 2·q fading over 0.5 s); a drag shift outside clutch state 1 is a missed shift
   (no throttle 0.45 s). Who puts the drag clutch in state 1 is not traced yet.
 
+### AI opponents and traffic (`docs/re/ai_re*.md`, static analysis, not yet ported)
+
+- Movers (jump table 0x5f493c): 1 PhysicsMover, 2 TrafficMover, 3 MellowMover, 4 Belt,
+  5 NIS. Race AI drives the MellowMover; PhysicsMover for 5 s after the green light or a
+  hit, while airborne, after finishing; drag / drift AI always PhysicsMover. Belt (spline,
+  ~0.899 × planned speed) when ≥ 120 m from the player after 30 s.
+- Skill: Easy 0–2, Medium 3–5, Hard 6–8 (0x4fed00); table GLOBALB 0x34b00, rows of 0x68
+  at +0x524. Quick race AI cars: stock, rating ≤ player + 0.06 (0x53ee90).
+- Planner every 8 frames: GetUnstuck / AccidentRecovery 500, IJustGotHit 400, Avoid 300,
+  Block 200/400, Pass 100, JustDrive 0. Target speed 0x41c5e0 = route node speed (+0x2c,
+  m/s) × skill scale (0.74–1.0) × catch-up, read at a braking point ±20–40 m random.
+  PsychoDriver: look-ahead 22.9–55.9 m, PID steering / speed. Nitrous below 0.8 × line
+  speed; skill ≥ 5 keeps it for the last 25 % of the final lap.
+- Rubber band 0x4172d0 / 0x4084a0 (only with the Catch Up option; career probably off):
+  m = 1 + lerp(graphA, graphB, skill/9)(gap) + clamp(−0.005·Δv/(1+0.01·gap²), ±0.05),
+  × a player-speed term; max(m,1) feeds engine torque, limiter and aero (car+0x468).
+- Traffic: count byte at track record +0xEC + reverse + level·2 (≤ 16, mostly 12); density
+  is the spawn spacing per road class and level ((240,300) m … (20,25) m); recycled at
+  250 m; kinematic mover capped at 24.59 m/s. Record +0x108 floats are lane-direction odds.
+
 ### Gameplay data
 
 - Race lines come from `Routes<track><F|B>.bin`, chained by race distance

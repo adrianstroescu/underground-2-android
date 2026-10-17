@@ -6,7 +6,7 @@ mass in t, force in kN, inertia in t·m², speed in m/s, angular speed in rad/s 
 ## Objects
 - Car object (`car`, mover type at car+0x28/0x38). `0x5f46a0` picks the mover by type through jump
   table 0x5f493c: **type 1 = full PhysicsMover** (built by `0x5b5cc0`, used for the player).
-  Type 2 = MellowMover (`0x5b6d00`, simplified "Mellovator" `0x5b0030`).
+  Type 2 = TrafficMover 0x408740; type 3 = MellowMover (`0x5b6d00`); 4 = Belt 0x5a9030; 5 = NIS (corrected by ai_re.md).
 - PhysicsMover (0x130 bytes): vtable **0x7a25e0**, update = **slot 1, 0x5b72d0(dt)**.
   Embedded component list at +8 (vtable 0x7a25d4). Fields:
   - +4 = input
