@@ -85,6 +85,7 @@ pub enum FeKind {
     StartCareer,
     PostRaceResults,
     PostRace,
+    PostRaceStats,
 }
 
 /// One row of the results table.
@@ -99,6 +100,30 @@ pub struct ResultRow {
     /// Drift score.
     pub score: Option<u32>,
     pub player: bool,
+    /// Race stats: lap times and places, laps led, best lap, top and average speed (m/s).
+    pub lap_times: Vec<f32>,
+    pub lap_places: Vec<usize>,
+    pub laps_led: u32,
+    pub laps: u32,
+    pub best_lap: Option<f32>,
+    pub top_speed: f32,
+    pub avg_speed: f32,
+}
+
+/// UI_PostRaceStats (fill speed2.exe 0x4e9c00): one racer at a time (left / right).
+struct Stats {
+    rows: Vec<ResultRow>,
+    racer: usize,
+    circuit: bool,
+    mph: bool,
+    from_menu: bool,
+    /// (name, data) objects of the stat rows and (time, position) of the lap list.
+    stat_objs: Vec<(Option<usize>, Option<usize>)>,
+    lap_objs: Vec<(Option<usize>, Option<usize>)>,
+    title: [f32; 4],
+    data: [f32; 4],
+    lap_time: [f32; 4],
+    lap_pos: [f32; 4],
 }
 
 /// UI_PostRaceResults (speed2.exe 0x4bf290): rank, name, car and time per row; the
@@ -222,6 +247,7 @@ pub struct FeScreen {
     list_kind: Option<ListKind>,
     car: Option<CarSelect>,
     results: Option<Results>,
+    stats: Option<Stats>,
 }
 
 #[derive(Default)]
@@ -270,6 +296,7 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::Options => 0x401,
         FeKind::StartCareer | FeKind::PostRace => 0x405,
         FeKind::PostRaceResults => 0x5,
+        FeKind::PostRaceStats => 0x404,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -499,7 +526,7 @@ impl Frontend {
             }
         }
         let results = Results { rows, drift, time: 0.0 };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results) };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -517,7 +544,50 @@ impl Frontend {
     }
 
     pub fn in_post_race(&self) -> bool {
-        matches!(self.kind(), Some(FeKind::PostRaceResults | FeKind::PostRace))
+        matches!(self.kind(), Some(FeKind::PostRaceResults | FeKind::PostRace | FeKind::PostRaceStats))
+    }
+
+    /// Whether the stats screen was opened from the post race menu (back goes there).
+    pub fn stats_from_menu(&self) -> bool {
+        self.screen.as_ref().and_then(|s| s.stats.as_ref()).is_some_and(|s| s.from_menu)
+    }
+
+    /// The race stats screen, starting on the player.
+    pub fn open_race_stats(&mut self, rows: Vec<ResultRow>, circuit: bool, mph: bool, from_menu: bool) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_PostRaceStats.fng")) else { return false };
+        let mut scene = Scene::new(pkg.clone());
+        scene.advance(1.0);
+        scene.send_named("CALL PACKAGE");
+        scene.send_named("CALL FRAMES");
+        let find = |s: &Scene, n: &str| s.index_of(h(n));
+        let rect = |s: &Scene, n: &str, def: [f32; 4]| {
+            find(s, n).map_or(def, |i| {
+                let d = &s.package.objects[i].data;
+                [d[7] - d[14] * 0.5, d[8] - d[15] * 0.5, d[14], d[15]]
+            })
+        };
+        let title = rect(&scene, "TITLE_MASTER", [-46.0, -113.0, 188.0, 36.0]);
+        let data_r = rect(&scene, "DATA_MASTER", [183.0, -113.0, 92.0, 32.0]);
+        let lap_time = rect(&scene, "TIME_MASTER", [-283.0, -89.0, 82.0, 26.0]);
+        let lap_pos = rect(&scene, "POSITION_MASTER", [-142.0, -89.0, 82.0, 26.0]);
+        let stat_objs = (1..=10).map(|n| (find(&scene, &format!("option_name_{n}")), find(&scene, &format!("option_data_{n}")))).collect();
+        let lap_objs = (1..=10).map(|n| (find(&scene, &format!("Time_Data_{n}")), find(&scene, &format!("position_data_{n}")))).collect();
+        if let Some(i) = find(&scene, "HEADER_TEXT") {
+            scene.states[i].text = data.strings.by_hash(0xc7da_078e).map(str::to_string);
+        }
+        let mut menu = IconMenu::default();
+        menu.hidden.extend(["_EVENT_HANDLER_", "EVENT", "Back_button", "Joy_Event"].into_iter().filter_map(|n| find(&scene, n)));
+        if !circuit {
+            menu.hidden.extend(["Head_text_2", "Head_text_3"].into_iter().filter_map(|n| find(&scene, n)));
+        }
+        menu.arrows = [find(&scene, "ScrollBar_Arrow_1"), find(&scene, "ScrollBar_Arrow_2")];
+        let racer = rows.iter().position(|r| r.player).unwrap_or(0);
+        let stats = Stats { rows, racer, circuit, mph, from_menu, stat_objs, lap_objs, title, data: data_r, lap_time, lap_pos };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats) };
+        s.apply(&data.strings);
+        self.screen = Some(s);
+        true
     }
 
     /// The career menu (UI_StartCareer, speed2.exe 0x4af110): Resume Career when a
@@ -693,7 +763,7 @@ impl Frontend {
         let (list, hidden) = OptionList::new(&mut scene, rows, visible);
         let mut menu = IconMenu::default();
         menu.hidden = hidden;
-        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None };
+        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -724,7 +794,7 @@ impl Frontend {
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None };
         s.apply(&data.strings);
         s.apply_car(data);
         self.screen = Some(s);
@@ -853,7 +923,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -919,6 +989,17 @@ impl Frontend {
             return true;
         }
         let Some(s) = &mut self.screen else { return false };
+        if let Some(st) = &mut s.stats {
+            let next = (st.racer as i32 + delta).clamp(0, st.rows.len() as i32 - 1) as usize;
+            if next == st.racer {
+                return false;
+            }
+            st.racer = next;
+            if let Some(a) = if delta < 0 { s.menu.arrows[0] } else { s.menu.arrows[1] } {
+                s.scene.set_script(a, h("Blink"));
+            }
+            return true;
+        }
         if let Some(c) = &mut s.car {
             // No wrap (speed2.exe 0x4e2590).
             let next = (c.selected as i32 + delta).clamp(0, c.cars.len() as i32 - 1) as usize;
@@ -969,6 +1050,9 @@ impl Frontend {
         if s.results.is_some() {
             return Some(FeAction::ResultsNext);
         }
+        if s.stats.is_some() {
+            return Some(FeAction::Back);
+        }
         Some(s.menu.options.get(s.menu.selected)?.action)
     }
 
@@ -1013,6 +1097,19 @@ impl Frontend {
                 }
                 Tap::Nothing => None,
             };
+        }
+        if self.screen.as_ref()?.stats.is_some() {
+            let s = self.screen.as_ref()?;
+            let near = |i: usize| {
+                let d = s.scene.values(i);
+                (vx - d[7] - 320.0).abs() < 40.0 && (vy - d[8] - 240.0).abs() < 40.0
+            };
+            if s.menu.arrows[0].is_some_and(near) {
+                self.step(-1);
+            } else if s.menu.arrows[1].is_some_and(near) {
+                self.step(1);
+            }
+            return None;
         }
         if self.screen.as_ref()?.car.is_some() {
             // The filter arrows (PC_FilterType's) change the filter.
@@ -1262,9 +1359,85 @@ impl FeScreen {
         }
     }
 
+    fn apply_stats(&mut self, strings: &ug2_formats::lang::Strings) {
+        let Some(st) = &self.stats else { return };
+        let Some(r) = st.rows.get(st.racer) else { return };
+        let label = |hash: u32| strings.by_hash(hash).unwrap_or("").to_string();
+        let car = strings.by_hash(bin_hash(&format!("CAR_NAME_{}", r.car))).map_or(r.car.clone(), str::to_string);
+        if let Some(i) = self.scene.index_of(h("RACER_DATA")) {
+            self.scene.states[i].text = Some(format!("{:2}   {} - {}", st.racer + 1, r.name, car));
+        }
+        // "%$3.1f %s": m/s × 2.237 mph or × 3.6 km/h.
+        let speed = |v: f32| if st.mph { format!("{:.1} {}", v * 2.237, label(0xe74b_86f8)) } else { format!("{:.1} {}", v * 3.6, label(0xe74b_7e13)) };
+        let leader = st.rows.first().and_then(|x| x.time);
+        let mut stats: Vec<(String, String)> = vec![
+            (label(0xf9d7_f4c2), r.time.map_or_else(|| label(0x61c9_b7a2), |t| race_time(t, false))),
+            (
+                label(0xab44_ed8b),
+                if r.retired {
+                    label(0x01e6_6364)
+                } else if st.racer == 0 {
+                    label(0x61c9_b7a2)
+                } else {
+                    match (r.time, leader) {
+                        (Some(t), Some(l)) => race_time(t - l, true),
+                        _ => label(0xd429_3449),
+                    }
+                },
+            ),
+            (label(0x5d30_4669), speed(r.top_speed)),
+            (label(0x5f38_e63e), speed(r.avg_speed)),
+        ];
+        if st.circuit {
+            stats.push((label(0xae28_0d3d), r.best_lap.map_or_else(|| label(0x61c9_b7a2), |t| race_time(t, false))));
+            stats.push((label(0xadbf_d917), format!("{}/{}", r.laps_led, r.laps)));
+        }
+        let [tl, tt, _, th] = st.title;
+        let [dl, _, dw, _] = st.data;
+        for (k, &(n, d)) in st.stat_objs.iter().enumerate() {
+            let row = stats.get(k);
+            let y = tt + k as f32 * th;
+            if let Some(i) = n {
+                let s = &mut self.scene.states[i];
+                s.hidden = Some(row.is_none());
+                s.position = Some([tl, y]);
+                s.text = row.map(|x| x.0.clone());
+            }
+            if let Some(i) = d {
+                let s = &mut self.scene.states[i];
+                s.hidden = Some(row.is_none());
+                s.position = Some([dl + dw, y]);
+                s.text = row.map(|x| x.1.clone());
+            }
+        }
+        // Lap list (circuits): "%d   %s" and the place, 10 a page.
+        for (k, &(t, p)) in st.lap_objs.iter().enumerate() {
+            let lap = st.circuit.then(|| r.lap_times.get(k)).flatten();
+            if let Some(i) = t {
+                let s = &mut self.scene.states[i];
+                s.hidden = Some(lap.is_none());
+                s.position = Some([st.lap_time[0], st.lap_time[1] + k as f32 * st.lap_time[3]]);
+                s.text = lap.map(|x| format!("{}   {}", k + 1, race_time(*x, false)));
+            }
+            if let Some(i) = p {
+                let s = &mut self.scene.states[i];
+                s.hidden = Some(lap.is_none());
+                s.position = Some([st.lap_pos[0] + st.lap_pos[2] * 0.5, st.lap_pos[1] + k as f32 * st.lap_pos[3]]);
+                s.text = r.lap_places.get(k).map(|x| x.to_string());
+            }
+        }
+        let n = st.rows.len();
+        for (k, hidden) in [(0, st.racer == 0), (1, st.racer + 1 >= n)] {
+            if let Some(a) = self.menu.arrows[k] {
+                self.scene.states[a].hidden = Some(hidden);
+            }
+        }
+    }
+
     /// Writes the controller state into the scene, as the game code does every frame.
     fn apply(&mut self, strings: &ug2_formats::lang::Strings) {
         self.apply_results(strings);
+        self.apply_stats(strings);
         if let Some(l) = &mut self.list {
             l.apply(&mut self.scene, strings);
         }

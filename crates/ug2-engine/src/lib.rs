@@ -922,12 +922,20 @@ impl Game {
                     retired: false,
                     score: Some(score),
                     player,
+                    lap_times: Vec::new(),
+                    lap_places: Vec::new(),
+                    laps_led: 0,
+                    laps: r.laps,
+                    best_lap: None,
+                    top_speed: 0.0,
+                    avg_speed: 0.0,
                 })
                 .collect();
         }
         r.standings()
             .into_iter()
             .map(|car| {
+                let p = &r.cars[car];
                 let model = if car == 0 { self.current_car() } else { self.session.opponents[car - 1].model.clone() };
                 fe::ResultRow {
                     name: if car == 0 { player_name.clone() } else { cars::display_name(&model).to_string() },
@@ -936,6 +944,13 @@ impl Game {
                     retired: r.cars[car].retired,
                     score: None,
                     player: car == 0,
+                    lap_times: p.lap_times.clone(),
+                    lap_places: p.lap_places.clone(),
+                    laps_led: p.laps_led,
+                    laps: r.laps,
+                    best_lap: p.best_lap,
+                    top_speed: p.top_speed,
+                    avg_speed: p.finish_time.map_or(0.0, |t| r.distance() / t.max(0.1)),
                 }
             })
             .collect()
@@ -1004,6 +1019,16 @@ impl Game {
                 true
             }
             Some(fe::FeKind::PostRaceResults) => true,
+            Some(fe::FeKind::PostRaceStats) => {
+                if self.fe.stats_from_menu() {
+                    self.fe.open_post_race();
+                } else {
+                    let rows = self.result_rows();
+                    let drift = self.session.race().is_some_and(|r| r.drift.is_some());
+                    self.fe.open_results(rows, drift);
+                }
+                true
+            }
             Some(fe::FeKind::StartCareer) => {
                 self.fe.open_main_menu();
                 true
@@ -1231,10 +1256,9 @@ impl Game {
                 return;
             }
             fe::FeAction::RaceStats => {
-                // UI_PostRaceStats is not done yet: the results table instead.
                 let rows = self.result_rows();
-                let drift = self.session.race().is_some_and(|r| r.drift.is_some());
-                self.fe.open_results(rows, drift);
+                let circuit = self.session.race().is_some_and(|r| r.def.line.circuit && r.drift.is_none());
+                self.fe.open_race_stats(rows, circuit, self.hud.mph, true);
                 return;
             }
             fe::FeAction::CloseDialog => return,

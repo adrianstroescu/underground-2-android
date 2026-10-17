@@ -34,6 +34,13 @@ pub struct Progress {
     pub best_lap: Option<f32>,
     /// Out of the race (blown engine).
     pub retired: bool,
+    /// Race stats (UI_PostRaceStats): each lap's time and place, laps finished leading,
+    /// top speed (m/s).
+    pub lap_times: Vec<f32>,
+    pub lap_places: Vec<usize>,
+    pub laps_led: u32,
+    pub top_speed: f32,
+    last_pos: Option<Vec3>,
 }
 
 /// The scoring side of a drift event.
@@ -75,6 +82,11 @@ impl Race {
                     lap_start: 0.0,
                     best_lap: None,
                     retired: false,
+                    lap_times: Vec::new(),
+                    lap_places: Vec::new(),
+                    laps_led: 0,
+                    top_speed: 0.0,
+                    last_pos: None,
                 }
             })
             .collect();
@@ -103,10 +115,21 @@ impl Race {
         }
         let line = &self.def.line;
         let full = self.distance();
-        for (p, &pos) in self.cars.iter_mut().zip(positions) {
+        let mut lapped = Vec::new();
+        for (ci, (p, &pos)) in self.cars.iter_mut().zip(positions).enumerate() {
             if p.finish_time.is_some() || p.retired {
                 continue;
             }
+            if let Some(last) = p.last_pos {
+                if dt > 0.0 {
+                    // Ignore resets (jumps of more than 100 m/s).
+                    let v = (pos - last).length() / dt;
+                    if v < 100.0 {
+                        p.top_speed = p.top_speed.max(v);
+                    }
+                }
+            }
+            p.last_pos = Some(pos);
             p.index = line.locate(pos, Some(p.index));
             let d = line.dist[p.index];
             if line.circuit {
@@ -115,6 +138,8 @@ impl Race {
                     if p.lap >= 1 {
                         let lap_time = self.time - p.lap_start;
                         p.best_lap = Some(p.best_lap.map_or(lap_time, |b: f32| b.min(lap_time)));
+                        p.lap_times.push(lap_time);
+                        lapped.push(ci);
                     }
                     p.lap_start = self.time;
                 } else if p.last_dist < line.length * 0.25 && d > line.length * 0.75 {
@@ -134,6 +159,17 @@ impl Race {
             if done {
                 p.finish_time = Some(self.time);
                 p.total = full;
+            }
+        }
+        if !lapped.is_empty() {
+            let order = self.standings();
+            for ci in lapped {
+                let place = order.iter().position(|&c| c == ci).map_or(order.len(), |k| k + 1);
+                let p = &mut self.cars[ci];
+                p.lap_places.push(place);
+                if place == 1 {
+                    p.laps_led += 1;
+                }
             }
         }
         if self.phase == RacePhase::Running && (self.cars[0].finish_time.is_some() || self.cars[0].retired) {
