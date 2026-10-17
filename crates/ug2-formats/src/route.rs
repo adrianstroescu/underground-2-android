@@ -205,6 +205,9 @@ pub struct TrackInfo {
     pub region: String,
     /// Lap (circuit) or race (sprint) length in metres.
     pub length: u32,
+    /// Bayview district shown as the track's icon (speed2.exe 0x4984b0): 0 Upper Class,
+    /// 1 City Core, 2 Suburban Hills, 3 Coal Harbor, 4 Airport, 5 by race type.
+    pub location: u32,
     /// Mini-map (TRACKS/TRACKMAP<n>.BIN) calibration: world position of the image's
     /// upper-left corner and the width it covers.
     pub map_upper_left: [f32; 2],
@@ -221,6 +224,7 @@ pub fn parse_track_infos(global_b: &[u8]) -> Result<Vec<TrackInfo>> {
             name: cstr_at(rec, 0, 32)?,
             region: cstr_at(rec, 0x40, 8)?,
             length: u32_at(rec, 0x98)?,
+            location: u32_at(rec, 0x7C)?,
             map_upper_left: [f32_at(rec, 0xB0)?, f32_at(rec, 0xB4)?],
             map_width: f32_at(rec, 0xB8)?,
         });

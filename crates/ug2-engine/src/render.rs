@@ -305,6 +305,10 @@ pub struct Renderer {
     /// Lamp and car-light glows, into the glow target.
     pipe_glow: wgpu::RenderPipeline,
     pipe_fe: wgpu::RenderPipeline,
+    pipe_fe_add: wgpu::RenderPipeline,
+    pipe_fe_opaque: wgpu::RenderPipeline,
+    /// How each frontend texture blends.
+    fe_blend: HashMap<u32, crate::assets::FeBlend>,
     fe_vbuf: wgpu::Buffer,
     fe_capacity: u64,
     /// Frontend textures (clamped sampling), by name hash.
@@ -662,7 +666,7 @@ impl Renderer {
             push_constant_ranges: &[],
         });
         let fe_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
-        let pipe_fe = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let fe_pipe = |entry: &str, blend: wgpu::BlendState| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("fe"),
             layout: Some(&fe_pl),
             vertex: wgpu::VertexState {
@@ -680,16 +684,24 @@ impl Renderer {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &fe_shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(entry),
                 compilation_options: Default::default(),
                 targets: &[
-                    Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL }),
+                    Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL }),
                     Some(wgpu::ColorTargetState { format: TRAIL_FORMAT, blend: None, write_mask: wgpu::ColorWrites::empty() }),
                 ],
             }),
             multiview: None,
             cache: None,
         });
+        let fe_add = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::SrcAlpha,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let pipe_fe = fe_pipe("fs_main", wgpu::BlendState::ALPHA_BLENDING);
+        let pipe_fe_add = fe_pipe("fs_main", wgpu::BlendState { color: fe_add, alpha: fe_add });
+        let pipe_fe_opaque = fe_pipe("fs_opaque", wgpu::BlendState::ALPHA_BLENDING);
         let fe_capacity = 64 * 1024;
         let fe_vbuf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("fe vertices"),
@@ -753,6 +765,9 @@ impl Renderer {
             pipe_hud,
             pipe_glow,
             pipe_fe,
+            pipe_fe_add,
+            pipe_fe_opaque,
+            fe_blend: HashMap::new(),
             fe_vbuf,
             fe_capacity,
             fe_textures: HashMap::new(),
@@ -776,7 +791,8 @@ impl Renderer {
     }
 
     /// A frontend texture (menus, fonts), kept for the whole session.
-    pub fn upload_fe_texture(&mut self, gpu: &Gpu, t: &PreparedTexture) {
+    pub fn upload_fe_texture(&mut self, gpu: &Gpu, t: &PreparedTexture, blend: crate::assets::FeBlend) {
+        self.fe_blend.insert(t.hash, blend);
         if self.fe_textures.contains_key(&t.hash) {
             return;
         }
@@ -1353,13 +1369,19 @@ impl Renderer {
         let hud_count = f.hud.len() as u32;
         let (pipe_hud, hud_bg, hud_vbuf) = (&self.pipe_hud, &self.hud_bg, &self.hud_vbuf);
         let (pipe_fe, fe_vbuf, fe_textures, white) = (&self.pipe_fe, &self.fe_vbuf, &self.fe_textures, &self.white);
+        let (pipe_fe_add, pipe_fe_opaque, fe_blend) = (&self.pipe_fe_add, &self.pipe_fe_opaque, &self.fe_blend);
         let fe_batches = f.fe_batches;
         self.post.run(&gpu.queue, &mut encoder, target, &f.post, blur.is_some(), |pass| {
             if !fe_batches.is_empty() {
-                pass.set_pipeline(pipe_fe);
                 pass.set_bind_group(0, hud_bg, &[]);
                 pass.set_vertex_buffer(0, fe_vbuf.slice(..fe_bytes.len() as u64));
                 for b in fe_batches {
+                    use crate::assets::FeBlend;
+                    pass.set_pipeline(match fe_blend.get(&b.texture) {
+                        Some(FeBlend::Additive) => pipe_fe_add,
+                        Some(FeBlend::Opaque) => pipe_fe_opaque,
+                        _ => pipe_fe,
+                    });
                     let tex = if b.texture == 0 { white } else { fe_textures.get(&b.texture).unwrap_or(white) };
                     pass.set_bind_group(1, tex, &[]);
                     pass.draw(b.first..b.first + b.count, 0..1);

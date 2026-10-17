@@ -29,3 +29,10 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>, @location(2)
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     return textureSample(t_tex, s_tex, i.uv) * i.color;
 }
+
+// Textures that do not blend (the track maps): colour only, alpha from the vertex.
+@fragment
+fn fs_opaque(i: VsOut) -> @location(0) vec4<f32> {
+    let t = textureSample(t_tex, s_tex, i.uv);
+    return vec4<f32>(t.rgb * i.color.rgb, i.color.a);
+}

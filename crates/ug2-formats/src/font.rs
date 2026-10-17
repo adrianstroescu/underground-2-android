@@ -8,7 +8,8 @@
 //!   +0x18 u32 kerning table offset, +0x1C u32 end of kerning, +0x24 u32 ascent?,
 //!   +0x40 f32 1 / texture width, +0x44 f32 1 / texture height.
 //! * Glyphs, 16 bytes: u16 char, u8 width, u8 height, u16 u, u16 v (texture pixels),
-//!   i8 x offset, i8 y offset, u16 ?, u16 ?, u16 advance.
+//!   u8 ?, i8 x offset, i8 y offset from the line top ('.' 22, 'A' 6 in TT21i), 3 bytes ?,
+//!   u16 advance.
 //! * Kerning, 4 bytes: u16 second char, i8 adjustment, u8 first char.
 
 use std::collections::HashMap;
@@ -96,8 +97,8 @@ impl Font {
                     height: g[3],
                     u: u16::from_le_bytes([g[4], g[5]]),
                     v: u16::from_le_bytes([g[6], g[7]]),
-                    x_offset: g[8] as i8,
-                    y_offset: g[9] as i8,
+                    x_offset: g[9] as i8,
+                    y_offset: g[10] as i8,
                     advance: u16::from_le_bytes([g[14], g[15]]),
                 },
             );

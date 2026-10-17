@@ -253,6 +253,8 @@ pub struct RaceInfo {
     pub reward: u32,
     /// Lap (circuit) or race (sprint) length in metres, from the track table.
     pub length: u32,
+    /// District icon index (see `TrackInfo::location`).
+    pub location: u32,
 }
 
 /// Every race of the career list whose region `available` says is installed, one per
@@ -300,6 +302,7 @@ pub fn race_catalog(global_b: &[u8], available: impl Fn(&str) -> bool) -> Vec<Ra
             laps,
             reward: c.reward,
             length: info.length,
+            location: info.location,
         });
     }
     out.sort_by_key(|r| (r.mode as u8, r.track, r.reverse));

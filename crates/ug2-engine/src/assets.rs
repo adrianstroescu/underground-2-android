@@ -139,8 +139,9 @@ pub enum LoadEvent {
     Visibility(Option<Box<VisibleSections>>),
     /// The original frontend: FEng packages, strings and fonts.
     Frontend(Box<FrontendData>),
-    /// Frontend textures (menus, icons, fonts), kept for the session.
-    FeTextures(Vec<PreparedTexture>),
+    /// Frontend textures (menus, icons, fonts), kept for the session, with how each
+    /// blends (see [`fe_blend`]).
+    FeTextures(Vec<PreparedTexture>, Vec<(u32, FeBlend)>),
     /// The frontend's 3D backdrop (FRONTEND/PLATFORMS/<name>.BIN), drawn behind the menus.
     Platform(Box<MeshData>),
     /// The region's environment parameter maps (screen tint, fog...).
@@ -162,6 +163,8 @@ pub enum LoadRequest {
     Car { name: String, parts: ug2_formats::car::PartSet },
     /// Engine sound of `car` at upgrade `level` (the stock one comes with the car).
     Engine { car: String, level: usize },
+    /// A race's map for the track select screen (TRACKS/TRACKMAP<n>.BIN).
+    TrackMap(u16),
     /// Replace the world with region `0` (e.g. "L4RC"); answered like the first load,
     /// from `Progress` to `Done`.
     World(String),
@@ -214,6 +217,19 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             for req in req_rx {
                 match req {
                     LoadRequest::Car { name, parts } => send_car(&game, &shared, &mut lib, &cfg, &name, &parts, &tx),
+                    LoadRequest::TrackMap(n) => {
+                        if let Ok(data) = game.read(&format!("TRACKS/TRACKMAP{n}.BIN")) {
+                            let mut out = Vec::new();
+                            let mut opaque = Vec::new();
+                            for p in find_tpks(&data) {
+                                for t in &p.textures {
+                                    opaque.push((t.hash, fe_blend(t)));
+                                    out.extend(prepare_texture(t, cfg.bc_textures));
+                                }
+                            }
+                            let _ = tx.send(LoadEvent::FeTextures(out, opaque));
+                        }
+                    }
                     LoadRequest::World(region) => {
                         if let Err(e) = load_world(&game, &region, cfg.bc_textures, &tx) {
                             log::error!("load {region} failed: {e:#}");
@@ -722,6 +738,25 @@ fn load_platform(game: &GameDir, name: &str, bc: bool, tx: &Sender<LoadEvent>) -
     Ok(())
 }
 
+/// How a frontend quad blends, from its texture's AlphaBlendType: the PC menu frame
+/// draws most quads SRCALPHA/INVSRCALPHA and a few SRCALPHA/ONE (the icons are type
+/// 2). The track maps (type 5) have alpha 0 everywhere and show opaque.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeBlend {
+    Alpha,
+    Additive,
+    Opaque,
+}
+
+pub fn fe_blend(t: &Texture) -> FeBlend {
+    match t.alpha_blend {
+        2 => FeBlend::Additive,
+        5 => FeBlend::Opaque,
+        0 if t.alpha == AlphaUsage::Opaque => FeBlend::Opaque,
+        _ => FeBlend::Alpha,
+    }
+}
+
 pub struct FrontendData {
     pub packages: Vec<ug2_formats::feng::Package>,
     pub strings: ug2_formats::lang::Strings,
@@ -747,9 +782,11 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         }
     }
     let mut out = Vec::new();
+    let mut opaque = Vec::new();
     let mut seen = HashSet::new();
     let mut take = |t: &Texture, out: &mut Vec<PreparedTexture>| {
         if seen.insert(t.hash) {
+            opaque.push((t.hash, fe_blend(t)));
             out.extend(prepare_texture(t, bc));
         }
     };
@@ -774,7 +811,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         }
     }
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
-    let _ = tx.send(LoadEvent::FeTextures(out));
+    let _ = tx.send(LoadEvent::FeTextures(out, opaque));
     let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts })));
     Ok(())
 }

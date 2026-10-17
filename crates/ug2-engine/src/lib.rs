@@ -185,6 +185,8 @@ pub struct Game {
     /// The original frontend screens (FEng).
     fe: fe::Frontend,
     fe_verts: Vec<render::FeVertex>,
+    /// Frontend textures already asked of the loader.
+    fe_requested: std::collections::HashSet<u32>,
     fe_batches: Vec<render::FeBatch>,
     /// The original game files.
     data_dir: std::path::PathBuf,
@@ -316,6 +318,7 @@ impl Game {
             movie_view,
             fe: fe::Frontend::default(),
             fe_verts: Vec::new(),
+            fe_requested: Default::default(),
             fe_batches: Vec::new(),
             data_dir: data_dir.to_path_buf(),
             visual: visual::VisualTreatment::default(),
@@ -698,9 +701,11 @@ impl Game {
                 LoadEvent::Platform(mesh) => {
                     self.renderer.set_platform(&self.gpu, &mesh);
                 }
-                LoadEvent::FeTextures(list) => {
+                LoadEvent::FeTextures(list, blends) => {
+                    let blend_of: HashMap<u32, assets::FeBlend> = blends.into_iter().collect();
                     for t in &list {
-                        self.renderer.upload_fe_texture(&self.gpu, t);
+                        let b = blend_of.get(&t.hash).copied().unwrap_or(assets::FeBlend::Alpha);
+                        self.renderer.upload_fe_texture(&self.gpu, t, b);
                     }
                 }
                 LoadEvent::Frontend(d) => {
@@ -802,6 +807,16 @@ impl Game {
         } else if !want && self.fe.screen.is_some() {
             self.fe.close();
         }
+        // Track maps load when a track is first shown.
+        if let Some(t) = self.fe.wanted_texture() {
+            if self.fe_requested.insert(t) {
+                if let Some(n) = self.catalog.iter().find(|r| bin_hash(&format!("TRACKMAP{}", r.track)) == t).map(|r| r.track) {
+                    if let Some(l) = &self.loader {
+                        l.request(LoadRequest::TrackMap(n));
+                    }
+                }
+            }
+        }
         self.fe.update(dt);
     }
 
@@ -810,6 +825,10 @@ impl Game {
         match self.fe.kind() {
             Some(fe::FeKind::QuickRaceMode) => {
                 self.fe.open_main_menu();
+                true
+            }
+            Some(fe::FeKind::QuickRaceTrack) => {
+                self.fe.open_quick_race_modes();
                 true
             }
             _ => false,
@@ -826,10 +845,19 @@ impl Game {
             fe::FeAction::Customize => frontend::Row::Garage,
             fe::FeAction::Options => frontend::Row::Options,
             fe::FeAction::Mode(m) => {
-                // The track and options screens are still the port's own.
                 self.quick.mode = m;
-                self.quick.race = 0;
-                self.quick.laps = self.selected_race().map_or(2, |r| r.laps.max(1));
+                let races: Vec<(usize, roads::RaceInfo)> =
+                    self.catalog.iter().enumerate().filter(|(_, r)| r.mode == m).map(|(i, r)| (i, r.clone())).collect();
+                let refs: Vec<(usize, &roads::RaceInfo)> = races.iter().map(|(i, r)| (*i, r)).collect();
+                self.fe.open_track_select(&refs);
+                return;
+            }
+            fe::FeAction::Track(i) => {
+                // The options and car screens are still the port's own.
+                let Some(race) = self.catalog.get(i).cloned() else { return };
+                self.quick.mode = race.mode;
+                self.quick.race = self.catalog.iter().filter(|r| r.mode == race.mode).position(|r| r.track == race.track && r.reverse == race.reverse).unwrap_or(0);
+                self.quick.laps = race.laps.max(1);
                 frontend::Row::QuickRace
             }
             fe::FeAction::FreeRun => frontend::Row::FreeRoam,

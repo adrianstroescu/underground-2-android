@@ -24,6 +24,8 @@ pub enum FeAction {
     /// A quick race mode was chosen.
     Mode(crate::roads::Mode),
     FreeRun,
+    /// A race of the catalogue (index) on the track select screen.
+    Track(usize),
 }
 
 /// Which original screen is up.
@@ -31,15 +33,30 @@ pub enum FeAction {
 pub enum FeKind {
     MainMenu,
     QuickRaceMode,
+    QuickRaceTrack,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Something an option shows elsewhere on the screen while it is selected.
+#[derive(Clone, Debug)]
+pub enum Detail {
+    Text(String),
+    /// Texture (name hash) of an image object.
+    Texture(u32),
+}
+
+#[derive(Clone, Debug)]
 pub struct IconOption {
     /// Texture name hash of the icon (e.g. MAIN_ICON_CAREER).
     pub icon: u32,
     /// Label hash in the language table (e.g. "Career").
     pub label: u32,
     pub action: FeAction,
+    /// (object name hash, what to show) while selected.
+    pub details: Vec<(u32, Detail)>,
+}
+
+fn opt(icon: u32, label: u32, action: FeAction) -> IconOption {
+    IconOption { icon, label, action, details: Vec::new() }
 }
 
 /// The icon scroller of a menu package.
@@ -86,10 +103,10 @@ impl Frontend {
     /// there is no network play here; Profile Manager is not done yet).
     pub fn open_main_menu(&mut self) -> bool {
         let options = vec![
-            IconOption { icon: bin_hash("MAIN_ICON_CAREER"), label: 0x5e7e_1192, action: FeAction::Career },
-            IconOption { icon: bin_hash("MAIN_ICON_QUICK_RACE"), label: 0x2490_9fd7, action: FeAction::QuickRace },
-            IconOption { icon: bin_hash("MAIN_ICON_CUSTOMIZE_CAR"), label: 0xa530_39a3, action: FeAction::Customize },
-            IconOption { icon: bin_hash("MAIN_ICON_OPTIONS"), label: 0xed1f_0b2c, action: FeAction::Options },
+            opt(bin_hash("MAIN_ICON_CAREER"), 0x5e7e_1192, FeAction::Career),
+            opt(bin_hash("MAIN_ICON_QUICK_RACE"), 0x2490_9fd7, FeAction::QuickRace),
+            opt(bin_hash("MAIN_ICON_CUSTOMIZE_CAR"), 0xa530_39a3, FeAction::Customize),
+            opt(bin_hash("MAIN_ICON_OPTIONS"), 0xed1f_0b2c, FeAction::Options),
         ];
         self.open_icon_menu("UI_Main.fng", FeKind::MainMenu, options)
     }
@@ -99,15 +116,67 @@ impl Frontend {
     pub fn open_quick_race_modes(&mut self) -> bool {
         use crate::roads::Mode;
         let options = vec![
-            IconOption { icon: bin_hash("MODE_ICON_CIRCUIT"), label: 0x93fd_ee74, action: FeAction::Mode(Mode::Circuit) },
-            IconOption { icon: bin_hash("MODE_ICON_SPRINT"), label: 0xdcb9_f861, action: FeAction::Mode(Mode::Sprint) },
-            IconOption { icon: bin_hash("MODE_ICON_DRAG"), label: 0x3510_2edf, action: FeAction::Mode(Mode::Drag) },
-            IconOption { icon: bin_hash("MODE_ICON_DRIFT"), label: 0xd716_2cfa, action: FeAction::Mode(Mode::Drift) },
-            IconOption { icon: bin_hash("MODE_ICON_SHORT_TRACK"), label: 0x30da_61e1, action: FeAction::Mode(Mode::StreetX) },
-            IconOption { icon: bin_hash("MODE_ICON_U_RACING_LEAGUE"), label: 0xc786_c4e7, action: FeAction::Mode(Mode::Url) },
-            IconOption { icon: bin_hash("MODE_ICON_FREE_RUN"), label: 0x6f24_21b7, action: FeAction::FreeRun },
+            opt(bin_hash("MODE_ICON_CIRCUIT"), 0x93fd_ee74, FeAction::Mode(Mode::Circuit)),
+            opt(bin_hash("MODE_ICON_SPRINT"), 0xdcb9_f861, FeAction::Mode(Mode::Sprint)),
+            opt(bin_hash("MODE_ICON_DRAG"), 0x3510_2edf, FeAction::Mode(Mode::Drag)),
+            opt(bin_hash("MODE_ICON_DRIFT"), 0xd716_2cfa, FeAction::Mode(Mode::Drift)),
+            opt(bin_hash("MODE_ICON_SHORT_TRACK"), 0x30da_61e1, FeAction::Mode(Mode::StreetX)),
+            opt(bin_hash("MODE_ICON_U_RACING_LEAGUE"), 0xc786_c4e7, FeAction::Mode(Mode::Url)),
+            opt(bin_hash("MODE_ICON_FREE_RUN"), 0x6f24_21b7, FeAction::FreeRun),
         ];
         self.open_icon_menu("UI_QRModeSelect.fng", FeKind::QuickRaceMode, options)
+    }
+
+    /// Track select (UI_QRTrackSelect): one option per race of the mode, with the
+    /// district icon (speed2.exe 0x4984b0), the track name (TRACK_NAME_%d /
+    /// REVERSE_TRACK_NAME_%d), race type, distance and the race's map (TRACKMAP%d).
+    pub fn open_track_select(&mut self, races: &[(usize, &crate::roads::RaceInfo)]) -> bool {
+        use crate::roads::Mode;
+        let mut options = Vec::new();
+        for &(i, r) in races {
+            let icon = match r.location {
+                0 => bin_hash("LOCATION_ICON_UPPER_CLASS"),
+                1 => bin_hash("LOCATION_ICON_CITY_CORE"),
+                2 => bin_hash("LOCATION_ICON_SUBURBAN_HILLS"),
+                3 => 0x4fde_6feb,
+                4 => bin_hash("LOCATION_ICON_AIRPORT"),
+                _ => h(match r.mode {
+                    Mode::Drag => "Track_Icon_Drag",
+                    Mode::Drift => "Track_Icon_Drift",
+                    Mode::StreetX => "Track_Icon_Short_Track",
+                    _ => "Track_Icon_U_Racing_League",
+                }),
+            };
+            let label = bin_hash(&if r.reverse { format!("REVERSE_TRACK_NAME_{}", r.track) } else { format!("TRACK_NAME_{}", r.track) });
+            // The race type label of the mode select screen.
+            let mode_label = match r.mode {
+                Mode::Circuit => 0x93fd_ee74,
+                Mode::Sprint => 0xdcb9_f861,
+                Mode::Drag => 0x3510_2edf,
+                Mode::Drift => 0xd716_2cfa,
+                Mode::StreetX => 0x30da_61e1,
+                Mode::Url => 0xc786_c4e7,
+            };
+            let mode_text = self.data.as_ref().and_then(|d| d.strings.by_hash(mode_label)).unwrap_or("").to_string();
+            let mut o = opt(icon, label, FeAction::Track(i));
+            o.details = vec![
+                (0x15e1_351b, Detail::Text(mode_text)),
+                (h("Distance"), Detail::Text(format!("{:.2} km", r.length as f32 / 1000.0))),
+                (0x0555_eeca, Detail::Text("--:--:--".into())),
+                (h("Track2000_map"), Detail::Texture(bin_hash(&format!("TRACKMAP{}", r.track)))),
+            ];
+            options.push(o);
+        }
+        self.open_icon_menu("UI_QRTrackSelect.fng", FeKind::QuickRaceTrack, options)
+    }
+
+    /// The track map the selected option shows (to load), if any.
+    pub fn wanted_texture(&self) -> Option<u32> {
+        let s = self.screen.as_ref()?;
+        s.menu.options.get(s.menu.selected)?.details.iter().find_map(|(_, d)| match d {
+            Detail::Texture(t) => Some(*t),
+            Detail::Text(_) => None,
+        })
     }
 
     pub fn kind(&self) -> Option<FeKind> {
@@ -122,19 +191,27 @@ impl Frontend {
         scene.send_named("CALL PACKAGE");
         scene.send_named("CALL FRAMES");
         let find = |n: &str| scene.index_of(h(n));
-        let master_i = find("OPTION_MASTER");
+        let master_i = find("OPTION_MASTER").or_else(|| find("ICON_MASTER"));
         let master = master_i.map_or([0.0, -134.0], |i| {
             let d = scene.values(i);
             [d[7], d[8]]
         });
         let width = master_i.map_or(118.0, |i| scene.values(i)[14]);
-        let slots: Vec<usize> = (1..=options.len()).filter_map(|k| find(&format!("option_{k}"))).collect();
+        let mut slots: Vec<usize> = (1..=options.len()).filter_map(|k| find(&format!("option_{k}"))).collect();
         let mut hidden: Vec<usize> = master_i.into_iter().collect();
         // Templates and debug objects the game code hides.
         for k in options.len() + 1..=16 {
             hidden.extend(find(&format!("option_{k}")));
         }
+        if slots.is_empty() {
+            // Track select clones "TRACK_ICON" objects (40 copies in the package).
+            let all: Vec<usize> = (0..scene.package.objects.len()).filter(|&i| scene.package.objects[i].hash == h("TRACK_ICON")).collect();
+            slots = all.iter().copied().take(options.len()).collect();
+            hidden.extend(all.iter().copied().skip(options.len()));
+        }
         hidden.extend(find("_EVENT_HANDLER_"));
+        // "Track Number DEBUG".
+        hidden.extend(scene.index_of(0x53c9_56c4));
         let menu = IconMenu {
             options,
             selected: 0,
@@ -142,7 +219,7 @@ impl Frontend {
             master,
             spacing: width + ICON_GAP,
             slots,
-            title: find("ICON_TITLE"),
+            title: find("ICON_TITLE").or_else(|| find("TRACK_NAME")),
             hidden,
             arrows: [find("ScrollBar_Arrow_1"), find("ScrollBar_Arrow_2")],
         };
@@ -270,6 +347,15 @@ impl FeScreen {
         }
         if let (Some(t), Some(o)) = (m.title, m.options.get(m.selected)) {
             self.scene.states[t].text = strings.by_hash(o.label).map(str::to_string);
+        }
+        if let Some(o) = m.options.get(m.selected) {
+            for (obj, d) in &o.details {
+                let Some(i) = self.scene.index_of(*obj) else { continue };
+                match d {
+                    Detail::Text(t) => self.scene.states[i].text = Some(t.clone()),
+                    Detail::Texture(t) => self.scene.states[i].texture = Some(*t),
+                }
+            }
         }
     }
 }
