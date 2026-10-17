@@ -1011,7 +1011,7 @@ impl Game {
 
     /// Quick race results use the original screens (career results are still the port's).
     fn original_results(&self) -> bool {
-        self.screen == Screen::Results && self.race_prize.is_none()
+        self.screen == Screen::Results && (self.race_prize.is_none() || self.career_race.is_some())
     }
 
     /// The results table rows, in finishing order.
@@ -1146,7 +1146,7 @@ impl Game {
             Some(fe::FeKind::PostRaceResults) => true,
             Some(fe::FeKind::PostRaceStats) => {
                 if self.fe.stats_from_menu() {
-                    self.fe.open_post_race();
+                    self.fe.open_post_race(self.career_race.is_some());
                 } else {
                     let rows = self.result_rows();
                     let drift = self.session.race().is_some_and(|r| r.drift.is_some());
@@ -1431,6 +1431,13 @@ impl Game {
             }
             fe::FeAction::ConfirmExplore => frontend::Row::FreeRoam,
             fe::FeAction::WorldMap => {
+                // From the post race menu: leave the race first.
+                if self.screen == Screen::Results {
+                    self.fe_row(frontend::Row::Continue);
+                    self.screen = Screen::Title;
+                    self.race_prize = None;
+                    self.career_race = None;
+                }
                 self.open_world_map();
                 return;
             }
@@ -1540,10 +1547,16 @@ impl Game {
             fe::FeAction::ConfirmQuit => {
                 let row = if self.screen == Screen::Results { frontend::Row::Continue } else { frontend::Row::QuitToMenu };
                 self.fe_row(row);
+                // A career race goes back to the crib.
+                if self.career_race.take().is_some() {
+                    self.screen = Screen::Title;
+                    self.race_prize = None;
+                    self.fe.open_crib(true);
+                }
                 return;
             }
             fe::FeAction::ResultsNext => {
-                self.fe.open_post_race();
+                self.fe.open_post_race(self.career_race.is_some());
                 return;
             }
             fe::FeAction::PostRestart => {

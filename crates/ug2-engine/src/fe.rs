@@ -570,12 +570,17 @@ impl Frontend {
 
     /// The post race menu (UI_PostRace, speed2.exe 0x4bee10) for a quick race: Restart,
     /// Race Stats, Quit to Main Menu (Replay only with a replay recorded).
-    pub fn open_post_race(&mut self) -> bool {
-        let options = vec![
+    pub fn open_post_race(&mut self, career: bool) -> bool {
+        let mut options = Vec::new();
+        if career {
+            // Career: back to the world map first (0x4bef17).
+            options.push(opt(bin_hash("INGAME_ICON_WORLD_MAP"), 0x5e67_0a9e, FeAction::WorldMap));
+        }
+        options.extend([
             opt(0xb295_a6b6, 0x8083_3fc2, FeAction::PostRestart),
             opt(bin_hash("INGAME_ICON_STATS"), 0xf82d_f37e, FeAction::RaceStats),
             opt(0x4c9e_34e6, 0xc7e1_420c, FeAction::QuitToMenu),
-        ];
+        ]);
         self.open_icon_menu("UI_PostRace.fng", FeKind::PostRace, options)
     }
 
