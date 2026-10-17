@@ -1616,12 +1616,13 @@ fn fe_camera() -> (Mat4, Vec3) {
 }
 
 /// The player's car on the frontend turntable, as in the captured menu frame: 9.43 m
-/// in front of the camera, at (0, 5.43) on the platform floor, yawed −54.2°.
+/// in front of the camera, on turntable disc 1 at (0, 5.44), yawed −54.2°.
 fn fe_car_transform(v: &Vehicle) -> Mat4 {
     let ground = v.pos.z - v.ride_height;
     let to_origin = Mat4::from_translation(-Vec3::new(v.pos.x, v.pos.y, ground));
     let turn = Mat4::from_rotation_z((-54.2f32).to_radians() - v.yaw);
-    Mat4::from_translation(Vec3::new(0.0, 5.43, 0.0)) * turn * to_origin * v.transform()
+    // DISC01's top is 0.17 m above the floor.
+    Mat4::from_translation(Vec3::new(0.0, 5.44, 0.1697)) * turn * to_origin * v.transform()
 }
 
 fn push_world_glows(out: &mut Vec<GpuVertex>, lights: &[ug2_formats::light::WorldLight], eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) {

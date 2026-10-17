@@ -710,7 +710,10 @@ fn load_platform(game: &GameDir, name: &str, bc: bool, tx: &Sender<LoadEvent>) -
     let mut n = 0;
     for list in ug2_formats::solid::find_solid_lists(&data) {
         for s in &list.solids {
-            append_solid(s, &Mat4::IDENTITY, &mut vertices, &mut buckets, &texture_of, &|_| 0, &mut bbox);
+            // Without instances, a solid's own matrix places it (the three turntable discs
+            // sit 120° apart, 5.44 m from the centre).
+            let m = Mat4::from_cols_array(&s.matrix);
+            append_solid(s, &m, &mut vertices, &mut buckets, &texture_of, &|_| 0, &mut bbox);
             n += 1;
         }
     }
