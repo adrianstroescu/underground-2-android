@@ -61,9 +61,10 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
   - Career menu (Resume / New / Load), the pause menu and pause options, the PC help
     bar and generic dialogs;
   - post race results table and menu (quick races);
-  - the race HUD for circuit, sprint and URL (HUD_SingleRace). For touch, the gauge
-    sits above the pedals and the map at the top left; side groups follow the screen
-    edges.
+  - the race HUDs (SingleRace, Short_Track, Drag, Drift, and Bayview free roam) at
+    the PC positions; side groups follow the screen edges. The touch layout of
+    docs/hud-target.png comes at the end (owner's call);
+  - quick race AI driver names and car pools; Lap KO races.
 
 ## Not tested on the phone yet
 
@@ -82,12 +83,11 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
      string offset; (label hash, offset) pairs).
    - The owner's PC install has mod files (Dec 2024: FrontB.lzc, GlobalB.lzc,
      English.bin, *MemoryFile.bin). The originals are the `.bak` files; prefer them.
-   - Remaining original screens: drag / drift / Street X HUDs, Race Stats, career
-     results, AI driver names, Customize, the career screens
+   - Remaining original screens: career results, Customize, the career screens
      (Crib, World Map, SMS), Profile Manager, EA Trax, Credits, Display options.
      Several new screens (options, pause, dialogs) still need a run on the phone.
      Quick race traffic density per level (None turns traffic off; the other
-     levels are not decoded) and Lap KO races are not done.
+     levels are not decoded) and the AI performance cap are not done.
    - Story scenes and tutorial / region movies at the right career moments. The FEng
      screens IG_PlayMovie and UI_Trailers drive them.
    - Fog per zone: the Normal Fog map is decoded (start, max and colour fields), but

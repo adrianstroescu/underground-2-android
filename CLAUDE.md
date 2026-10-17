@@ -326,6 +326,14 @@ shares the scene depth. Per frame, in this order:
   `*_CUSTOM_00` from `GLOBAL/HUD_CustomTextures_00.bin` (the fitted HUD part picks NN).
   Needle = rpm / dial max × 235°. The minimap shows 0.3 / zoom of TRACKMAP round the
   car; track record +0xAC minX, +0xB0 maxY, +0xB4 size, +0xC0 zoom.
+- HUD packages by race type: drag HUD_Drag (needle −43° + 86° × rpm / max, the
+  DRAG_RPM_* textures), drift HUD_Drift (multiplier steps 300/1200/3600/9600 on Medium,
+  drift comments from GLOBALB 0x34a07), Street X HUD_Short_Track. In a package every
+  object is visible unless a widget list hides it (FNG flag 0x1 = invisible).
+- Quick race AI: driver names are 53 ASCII strings at `0x7f6cd0`, drawn without
+  repeats. Cars come from the 26-car pool `0x7f6da4` (SUV pool `0x7f6ddc`), capped by
+  the player's performance rating (`0x4feaf0`). Skill comes from GLOBALB 0x34b00.
+- Traffic level: a float per level at `[0x883dac] + 0x108 + level·4` (source not traced).
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
