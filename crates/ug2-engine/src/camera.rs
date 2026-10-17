@@ -10,6 +10,20 @@ pub enum CameraMode {
     ChaseNear,
     ChaseFar,
     Bumper,
+    /// Over the hood. The original's camera numbers are not decoded; placed by eye.
+    Hood,
+}
+
+impl CameraMode {
+    /// From Options > Player > Camera: 0 Bumper, 1 Hood, 2 Close, 3 Far.
+    pub fn from_option(v: u8) -> Self {
+        match v {
+            0 => CameraMode::Bumper,
+            1 => CameraMode::Hood,
+            2 => CameraMode::ChaseNear,
+            _ => CameraMode::ChaseFar,
+        }
+    }
 }
 
 pub struct ChaseCamera {
@@ -26,10 +40,12 @@ impl ChaseCamera {
     }
 
     pub fn next_mode(&mut self) {
+        // The option's order: Bumper, Hood, Close, Far.
         self.mode = match self.mode {
+            CameraMode::Bumper => CameraMode::Hood,
+            CameraMode::Hood => CameraMode::ChaseNear,
             CameraMode::ChaseNear => CameraMode::ChaseFar,
             CameraMode::ChaseFar => CameraMode::Bumper,
-            CameraMode::Bumper => CameraMode::ChaseNear,
         };
     }
 
@@ -46,7 +62,7 @@ impl ChaseCamera {
             let travel = v.y.atan2(v.x);
             heading = car.yaw + wrap(travel - car.yaw) * 0.5;
         }
-        let lag = if self.mode == CameraMode::Bumper { 30.0 } else { 5.0 };
+        let lag = if matches!(self.mode, CameraMode::Bumper | CameraMode::Hood) { 30.0 } else { 5.0 };
         self.yaw += wrap(heading - self.yaw) * (1.0 - (-lag * dt).exp());
         let mut dir = Vec3::new(self.yaw.cos(), self.yaw.sin(), 0.0);
         if look_back {
@@ -57,6 +73,7 @@ impl ChaseCamera {
             CameraMode::ChaseNear => (5.6 + speed * 0.012, 1.75, 4.0, 0.9),
             CameraMode::ChaseFar => (8.5 + speed * 0.02, 2.6, 5.0, 1.0),
             CameraMode::Bumper => (-1.9, 0.75, 20.0, 0.7),
+            CameraMode::Hood => (-0.3, 1.3, 20.0, 1.0),
         };
         let mut eye = car.pos - dir * back + Vec3::Z * height;
         if let Some(w) = world {
@@ -70,7 +87,7 @@ impl ChaseCamera {
         self.eye = eye;
         self.target = car.pos + dir * look_ahead + Vec3::Z * look_h;
         // Widen the view with speed for a sense of velocity.
-        let base = if self.mode == CameraMode::Bumper { 62.0 } else { 55.0 };
+        let base = if matches!(self.mode, CameraMode::Bumper | CameraMode::Hood) { 62.0 } else { 55.0 };
         self.fov_y = (base + (speed / 72.0).min(1.0) * 12.0).to_radians();
     }
 

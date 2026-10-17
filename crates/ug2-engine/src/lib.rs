@@ -188,6 +188,7 @@ pub struct Game {
     fe_verts: Vec<render::FeVertex>,
     /// Whether the Options were last applied on the frontend (menu music) or not.
     options_title: Option<bool>,
+    options_camera: Option<camera::CameraMode>,
     /// Frontend textures already asked of the loader.
     fe_requested: std::collections::HashSet<u32>,
     fe_batches: Vec<render::FeBatch>,
@@ -322,6 +323,7 @@ impl Game {
             fe: fe::Frontend::default(),
             fe_verts: Vec::new(),
             options_title: None,
+            options_camera: None,
             fe_requested: Default::default(),
             fe_batches: Vec::new(),
             data_dir: data_dir.to_path_buf(),
@@ -940,6 +942,12 @@ impl Game {
         };
         self.sound.with(|m| m.levels = levels);
         self.hud.mph = get("speedo_units", 0.0) == 0.0;
+        // The Camera option is the view a drive starts with (the camera button cycles).
+        let camera = camera::CameraMode::from_option(get("camera", 3.0) as u8);
+        if self.options_camera != Some(camera) {
+            self.options_camera = Some(camera);
+            self.camera.mode = camera;
+        }
     }
 
     /// The original car select: the racer car types in GLOBALB order, without the ones
