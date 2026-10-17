@@ -59,7 +59,11 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
   - Options (Audio, Gameplay, Player) with the game's rows and defaults, saved in
     ug2.cfg as `opt.*`; volumes, speedometer units, camera and transmission act;
   - Career menu (Resume / New / Load), the pause menu and pause options, the PC help
-    bar and generic dialogs.
+    bar and generic dialogs;
+  - post race results table and menu (quick races);
+  - the race HUD for circuit, sprint and URL (HUD_SingleRace). For touch, the gauge
+    sits above the pedals and the map at the top left; side groups follow the screen
+    edges.
 
 ## Not tested on the phone yet
 
@@ -78,7 +82,8 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
      string offset; (label hash, offset) pairs).
    - The owner's PC install has mod files (Dec 2024: FrontB.lzc, GlobalB.lzc,
      English.bin, *MemoryFile.bin). The originals are the `.bak` files; prefer them.
-   - Remaining original screens: post-race screens, HUD, Customize, the career screens
+   - Remaining original screens: drag / drift / Street X HUDs, Race Stats, career
+     results, AI driver names, Customize, the career screens
      (Crib, World Map, SMS), Profile Manager, EA Trax, Credits, Display options.
      Several new screens (options, pause, dialogs) still need a run on the phone.
      Quick race traffic density per level (None turns traffic off; the other

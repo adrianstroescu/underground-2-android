@@ -318,6 +318,14 @@ shares the scene depth. Per frame, in this order:
   value × track × 0.95, knob 7 past it. UI_Options shows 8 rows, the quick race list 7.
 - Dialogs: `0x558790(package, button labels..., message)`, GenericDialog_SMALL: text
   `message_blurb`, buttons button1 / button2 (two) or button3 (one).
+- Post race (quick race): UI_PostRaceResults then the UI_PostRace menu (`0x4bee10`).
+  Times print as "M:SS.hh", "SS.hh" under a minute (`0x576d30`). All these in-game
+  packages are in `GLOBAL/InGame*.bun`.
+- Race HUD (`fe_hud.rs`, notes in the HUD ctor `0x4f8bf0`): HUD_SingleRace for circuit,
+  sprint and URL; HUD_Drag / HUD_Drift / HUD_Short_Track otherwise. The dials are
+  `*_CUSTOM_00` from `GLOBAL/HUD_CustomTextures_00.bin` (the fitted HUD part picks NN).
+  Needle = rpm / dial max × 235°. The minimap shows 0.3 / zoom of TRACKMAP round the
+  car; track record +0xAC minX, +0xB0 maxY, +0xB4 size, +0xC0 zoom.
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
