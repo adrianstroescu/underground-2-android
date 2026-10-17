@@ -12,6 +12,9 @@ const CHAIN: f32 = 3.0;
 /// Wall or car hit (m/s into it) that loses the slide in progress.
 const CRASH: f32 = 4.0;
 const MAX_MULTIPLIER: u32 = 5;
+/// Points one drift needs to raise the multiplier from 1, 2, 3, 4 (speed2.exe table
+/// 0x79da88, Medium difficulty; the HUD's "Gain 2X with:").
+pub const MULTIPLIER_STEPS: [u32; 4] = [300, 1200, 3600, 9600];
 
 #[derive(Clone, Debug)]
 pub struct DriftScore {
@@ -77,8 +80,10 @@ impl DriftScore {
         self.banks += 1;
         self.last_bank = points;
         self.flash = Some((format!("+{points}"), 1.5));
-        if self.current > 250.0 {
-            self.multiplier = (self.multiplier + 1).min(MAX_MULTIPLIER);
+        if let Some(&need) = MULTIPLIER_STEPS.get(self.multiplier as usize - 1) {
+            if points >= need {
+                self.multiplier = (self.multiplier + 1).min(MAX_MULTIPLIER);
+            }
         }
         self.current = 0.0;
         self.settle = 0.0;

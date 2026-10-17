@@ -267,21 +267,10 @@ impl RaceHud {
         RaceHud { scene, kind, banks_seen: 0, comment_time: 9.0, drift_idle: 9.0, shown, shift_serial: 0, shift_time: 0.0, map_object, wide: 0.0, time: 0.0, dial: None }
     }
 
-    /// Touch layout: the gauge cluster rises above the pedals and the minimap moves to
-    /// the top left (the owner's HUD design, docs/hud-target.png); side groups follow
-    /// the screen edges.
-    fn offset(&self, name_hash: u32, x: f32) -> [f32; 2] {
-        let gauge = [h("GaugeCluster"), h("Group"), h("Drift_Angle_Backing3")];
-        let map = [h("Track2000_map"), h("Minimap_Mask"), h("TrackMapTargetRing"), h("Minimap_North_indicator"), h("PlayerCarIndicator_1")];
-        let dx = if x > 0.0 { self.wide } else { -self.wide };
-        if self.kind == HudKind::Drag {
-            return [dx, 0.0];
-        }
-        if gauge.contains(&name_hash) {
-            return [dx - 30.0, -95.0];
-        }
-        let dy = if map.contains(&name_hash) { -205.0 } else { 0.0 };
-        [dx, dy]
+    /// Wide screens: side groups stick to the screen edges, as the PC widescreen HUD
+    /// does. (The touch layout of docs/hud-target.png comes at the end, owner's call.)
+    fn offset(&self, _name_hash: u32, x: f32) -> [f32; 2] {
+        [if x > 0.0 { self.wide } else { -self.wide }, 0.0]
     }
 
     fn place_groups(&mut self) {
@@ -291,13 +280,7 @@ impl RaceHud {
                 continue;
             }
             let [dx, dy] = self.offset(o.hash, o.data[7]);
-            let (x, y) = (o.data[7] + dx, o.data[8] + dy);
-            self.scene.states[i].position = Some([x, y]);
-            // The gauge cluster is drawn at 0.8 so it fits between the leaderboard and
-            // the pedals.
-            if self.kind != HudKind::Drag && [h("GaugeCluster"), h("Group"), h("Drift_Angle_Backing3")].contains(&o.hash) {
-                self.scene.states[i].size = Some([0.8, 0.8]);
-            }
+            self.scene.states[i].position = Some([o.data[7] + dx, o.data[8] + dy]);
         }
     }
 
@@ -553,6 +536,19 @@ impl RaceHud {
         self.set_text("SP_DRIFT_TOTAL", thousands(d.total));
         self.set_text("BestDrift", thousands(d.best));
         self.set_text("drift_multiplier_text", format!("X{}", d.multiplier));
+        // Next multiplier: "Gain %dX with:" and the points it needs; at the top, "MAX".
+        match crate::drift::MULTIPLIER_STEPS.get(d.multiplier as usize - 1) {
+            Some(&need) => {
+                if let Some(t) = strings.by_hash(0xe03e_f7a4) {
+                    self.set_text("NextSpeeed_Trap_Indicator", t.replace("%d", &(d.multiplier + 1).to_string()));
+                }
+                self.set_text("SpeedTrap_Speed_DATA", thousands(need));
+            }
+            None => {
+                self.set_text("NextSpeeed_Trap_Indicator", strings.by_hash(0xcc62_c8be).unwrap_or("MAX").to_string());
+                self.set_text("SpeedTrap_Speed_DATA", "----".into());
+            }
+        }
         // A banked drift's comment, shown 2 s.
         if d.banks != self.banks_seen {
             self.banks_seen = d.banks;
