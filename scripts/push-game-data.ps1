@@ -39,7 +39,7 @@ function Push($rel) {
     throw "adb push failed for $rel"
 }
 
-foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata", "FRONTEND", "LANGUAGES") { Push $d }
+foreach ($d in "CARS", "GLOBAL", "SOUND", "pfdata", "FRONTEND", "LANGUAGES", "CREDITS") { Push $d }
 # The movies (~0.9 GB): EA/THX logos, the opening and the story scenes.
 if (-not $NoMovies) { Push "MOVIES" }
 if ($Full) {

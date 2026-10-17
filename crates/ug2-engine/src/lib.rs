@@ -1080,6 +1080,10 @@ impl Game {
         } else if !title && !pause && !(self.original_results() && ready) && self.fe.screen.is_some() {
             self.fe.close();
         }
+        // At the end of the credits the game goes back to the options.
+        if self.fe.kind() == Some(fe::FeKind::Credits) && self.fe.credits_done() {
+            self.fe.open_options_main();
+        }
         // The car select shows the browsed car on the turntable.
         if let Some(name) = self.fe.wanted_car().map(str::to_string) {
             if self.current_car() != name {
@@ -1152,6 +1156,10 @@ impl Game {
                     self.apply_options();
                 }
                 self.fe.open_pause_options_main();
+                true
+            }
+            Some(fe::FeKind::Credits) => {
+                self.fe.open_options_main();
                 true
             }
             Some(fe::FeKind::OptionsMain) => {
@@ -1304,6 +1312,10 @@ impl Game {
                 return;
             }
             fe::FeAction::OptionsCategory(c) => {
+                if c == 8 {
+                    self.fe.open_credits();
+                    return;
+                }
                 let opts = self.cfg.options.clone();
                 if !self.fe.open_options(c, |k| opts.get(k).copied()) {
                     // EA Trax and Credits are not done yet.

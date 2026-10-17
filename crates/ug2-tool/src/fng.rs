@@ -96,6 +96,9 @@ pub fn render(game_dir: &str, name: &str, out: &Path, ms: Option<f32>) -> Result
                 for t in &sc.tracks {
                     println!("  off {} base {:?} keys {:?}", t.offset, t.base, t.keys);
                 }
+                for e in &sc.events {
+                    println!("  event at {} ms: message {:08x} target {:08x}", e.time, e.message, e.target);
+                }
             }
         }
     }

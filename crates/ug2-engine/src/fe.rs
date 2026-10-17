@@ -86,7 +86,20 @@ pub enum FeKind {
     PostRaceResults,
     PostRace,
     PostRaceStats,
+    Credits,
 }
+
+/// Credits.fng (speed2.exe 0x4b87b0): every line is a copy of CreditsArea running
+/// ROLLCREDIT (5.2 s up the screen); each starts 0.3 s after the previous one (the
+/// script's event at 300 ms).
+struct Credits {
+    slots: Vec<usize>,
+    time: f32,
+}
+
+const CREDIT_SLOTS: usize = 18;
+const CREDIT_STEP: f32 = 0.3;
+const CREDIT_LEN: f32 = 5.2;
 
 /// One row of the results table.
 #[derive(Clone, Debug)]
@@ -250,6 +263,7 @@ pub struct FeScreen {
     car: Option<CarSelect>,
     results: Option<Results>,
     stats: Option<Stats>,
+    credits: Option<Credits>,
 }
 
 #[derive(Default)]
@@ -299,6 +313,7 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::StartCareer | FeKind::PostRace => 0x405,
         FeKind::PostRaceResults => 0x5,
         FeKind::PostRaceStats => 0x404,
+        FeKind::Credits => 0x401,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -528,7 +543,7 @@ impl Frontend {
             }
         }
         let results = Results { rows, drift, time: 0.0 };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None, credits: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -547,6 +562,41 @@ impl Frontend {
 
     pub fn in_post_race(&self) -> bool {
         matches!(self.kind(), Some(FeKind::PostRaceResults | FeKind::PostRace | FeKind::PostRaceStats))
+    }
+
+    /// The credits roll; true when it has ended.
+    pub fn credits_done(&self) -> bool {
+        let (Some(s), Some(d)) = (&self.screen, &self.data) else { return false };
+        s.credits.as_ref().is_some_and(|c| c.time > d.credits.len() as f32 * CREDIT_STEP + CREDIT_LEN)
+    }
+
+    pub fn open_credits(&mut self) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("Credits.fng")) else { return false };
+        let mut pkg = pkg.clone();
+        let area = h("CreditsArea");
+        let Some(src) = pkg.objects.iter().position(|o| o.hash == area) else { return false };
+        // Copies of the line object, one per line on screen at a time.
+        let mut slots = vec![src];
+        for k in 1..CREDIT_SLOTS {
+            let mut o = pkg.objects[src].clone();
+            o.hash = area.wrapping_add(k as u32);
+            o.guid = o.guid.wrapping_add(0x1000_0000 + k as u32);
+            pkg.objects.push(o);
+            slots.push(pkg.objects.len() - 1);
+        }
+        let mut scene = Scene::new(pkg);
+        scene.advance(1.0);
+        scene.send_named("CALL PACKAGE");
+        scene.send_named("CALL FRAMES");
+        let mut menu = IconMenu::default();
+        menu.hidden.extend(scene.index_of(h("_EVENT_HANDLER_")));
+        let credits = Credits { slots, time: 0.0 };
+        let mut s = FeScreen { scene, kind: FeKind::Credits, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: Some(credits) };
+        s.apply(&data.strings);
+        s.apply_credits(&data.credits);
+        self.screen = Some(s);
+        true
     }
 
     /// Whether the stats screen was opened from the post race menu (back goes there).
@@ -586,7 +636,7 @@ impl Frontend {
         menu.arrows = [find(&scene, "ScrollBar_Arrow_1"), find(&scene, "ScrollBar_Arrow_2")];
         let racer = rows.iter().position(|r| r.player).unwrap_or(0);
         let stats = Stats { rows, racer, circuit, mph, from_menu, stat_objs, lap_objs, title, data: data_r, lap_time, lap_pos };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats) };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats), credits: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -765,7 +815,7 @@ impl Frontend {
         let (list, hidden) = OptionList::new(&mut scene, rows, visible);
         let mut menu = IconMenu::default();
         menu.hidden = hidden;
-        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None };
+        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None, credits: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -796,7 +846,7 @@ impl Frontend {
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None, credits: None };
         s.apply(&data.strings);
         s.apply_car(data);
         self.screen = Some(s);
@@ -925,7 +975,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -950,6 +1000,10 @@ impl Frontend {
         if let Some(r) = &mut s.results {
             r.time += dt;
         }
+        if let Some(c) = &mut s.credits {
+            c.time += dt;
+        }
+        s.apply_credits(&data.credits);
         let kind = s.kind;
         if self.help.is_none() {
             self.help = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_PC_Help_Bar.fng")).map(|p| {
@@ -1359,6 +1413,31 @@ impl FeScreen {
                 (_, Some(t)) => race_time(t, false),
             };
             set(format!("Time_Data_{n}"), time);
+        }
+    }
+
+    /// Places each credits line copy at its point in ROLLCREDIT.
+    fn apply_credits(&mut self, lines: &[String]) {
+        let Some(c) = &self.credits else { return };
+        let roll = h("RollCredit");
+        for (s, &i) in c.slots.iter().enumerate() {
+            // The latest line k of this slot that has started.
+            let started = (c.time / CREDIT_STEP).floor() as i64;
+            let mut k = started - (started - s as i64).rem_euclid(CREDIT_SLOTS as i64);
+            let t = c.time - k as f32 * CREDIT_STEP;
+            if k < 0 || t > CREDIT_LEN || k as usize >= lines.len() {
+                k = -1;
+            }
+            let st = &mut self.scene.states[i];
+            if k < 0 {
+                st.hidden = Some(true);
+                continue;
+            }
+            st.hidden = Some(false);
+            st.text = Some(lines[k as usize].clone());
+            st.script = roll;
+            st.time = t * 1000.0;
+            st.running = true;
         }
     }
 

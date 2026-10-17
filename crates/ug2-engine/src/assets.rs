@@ -771,6 +771,8 @@ pub struct FrontendData {
     pub engines: HashMap<String, [f32; 4]>,
     /// TRACKMAP4000 calibration (Bayview free roam, track 0xFA0).
     pub explore_map: Option<[f32; 4]>,
+    /// The credits (CREDITS/NA_ENGLISH.TXT, UTF-16), one entry per line.
+    pub credits: Vec<String>,
 }
 
 /// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
@@ -840,6 +842,16 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
             p.textures.iter().for_each(|t| take(t, &mut out));
         }
     }
+    // speed2.exe 0x4b87b0 loads "CREDITS\\%s%s.TXT" (NA_ENGLISH for the English game).
+    let credits: Vec<String> = game
+        .read("CREDITS/NA_ENGLISH.TXT")
+        .ok()
+        .map(|b| {
+            let words: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let text = String::from_utf16_lossy(&words);
+            text.trim_start_matches('\u{feff}').lines().map(str::to_string).collect()
+        })
+        .unwrap_or_default();
     let mut cars = Vec::new();
     let mut ratings = HashMap::new();
     let mut engines = HashMap::new();
@@ -881,7 +893,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
     let textures = opaque.iter().map(|(h, _)| *h).collect();
     let _ = tx.send(LoadEvent::FeTextures(out, opaque));
-    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines, explore_map })));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines, explore_map, credits })));
     Ok(())
 }
 
