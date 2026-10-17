@@ -377,6 +377,8 @@ pub struct Hud {
     pub touch_seen: bool,
     /// Drag race layout: shift buttons instead of brake and handbrake.
     drag: bool,
+    /// Speedometer in miles per hour (Options > Gameplay > Speedometer Units).
+    pub mph: bool,
     /// Manual gearbox outside drags: shift buttons beside the pedals.
     manual: bool,
 }
@@ -399,6 +401,7 @@ impl Hud {
             triggers: Vec::new(),
             touch_seen: false,
             drag: false,
+            mph: true,
             manual: false,
         }
     }
@@ -688,9 +691,10 @@ impl Hud {
             g => g.to_string(),
         };
         c.text(center.x, center.y - 24.0 * s, 2.2 * s, 0.5, &gear, ACCENT);
-        let speed = format!("{}", t.speed_kmh.round().max(0.0) as i32);
+        let (value, unit) = if self.mph { (t.speed_kmh / 1.609_344, "MPH") } else { (t.speed_kmh, "KM/H") };
+        let speed = format!("{}", value.round().max(0.0) as i32);
         c.text(center.x, center.y + 9.0 * s, 2.6 * s, 0.5, &speed, WHITE);
-        c.text(center.x, center.y + 30.0 * s, 1.1 * s, 0.5, "KM/H", [1.0, 1.0, 1.0, 0.75]);
+        c.text(center.x, center.y + 30.0 * s, 1.1 * s, 0.5, unit, [1.0, 1.0, 1.0, 0.75]);
     }
 
     /// Circular heading-up minimap, top left: roads, the race route, other racers.

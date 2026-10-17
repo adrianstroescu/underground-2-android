@@ -186,6 +186,8 @@ pub struct Game {
     /// The original frontend screens (FEng).
     fe: fe::Frontend,
     fe_verts: Vec<render::FeVertex>,
+    /// Whether the Options were last applied on the frontend (menu music) or not.
+    options_title: Option<bool>,
     /// Frontend textures already asked of the loader.
     fe_requested: std::collections::HashSet<u32>,
     fe_batches: Vec<render::FeBatch>,
@@ -319,6 +321,7 @@ impl Game {
             movie_view,
             fe: fe::Frontend::default(),
             fe_verts: Vec::new(),
+            options_title: None,
             fe_requested: Default::default(),
             fe_batches: Vec::new(),
             data_dir: data_dir.to_path_buf(),
@@ -924,13 +927,19 @@ impl Game {
     fn apply_options(&mut self) {
         let o = &self.cfg.options;
         let get = |k: &str, d: f32| o.get(k).copied().unwrap_or(d);
-        log::info!(
-            "options: master {} transmission {} camera {} units {}",
-            get("master_volume", 1.0),
-            get("transmission", 0.0),
-            get("camera", 3.0),
-            get("speedo_units", 0.0)
-        );
+        // Menu music on the frontend, game music elsewhere.
+        let music = if self.screen == Screen::Title { get("menu_music_volume", 0.7) } else { get("game_music_volume", 1.0) };
+        let levels = ug2_audio::sound::Levels {
+            master: get("master_volume", 1.0),
+            music,
+            speech: get("speech_volume", 1.0),
+            effects: get("sfx_volume", 1.0),
+            tires: get("tire_volume", 1.0),
+            engine: get("engine_volume", 1.0),
+            mono: get("audio_mode", 1.0) == 0.0,
+        };
+        self.sound.with(|m| m.levels = levels);
+        self.hud.mph = get("speedo_units", 0.0) == 0.0;
     }
 
     /// The original car select: the racer car types in GLOBALB order, without the ones
@@ -1174,6 +1183,12 @@ impl Game {
     }
 
     pub fn update(&mut self, dt: f32) {
+        // Menu and game music levels differ: re-apply when the frontend comes or goes.
+        let title = self.screen == Screen::Title;
+        if self.options_title != Some(title) {
+            self.options_title = Some(title);
+            self.apply_options();
+        }
         self.update_movies();
         self.update_fe(dt.clamp(0.0, 0.1));
         let dt = dt.clamp(0.0, 0.1);

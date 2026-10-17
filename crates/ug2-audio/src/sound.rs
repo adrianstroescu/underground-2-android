@@ -240,6 +240,9 @@ pub struct Mixer {
     movie: Option<Arc<Mutex<VecDeque<f32>>>>,
     pub music_volume: f32,
     pub sfx_volume: f32,
+    /// The game's Audio options (0..1): master, music, speech & movie, effects, tires,
+    /// engine; `mono` sums the channels.
+    pub levels: Levels,
     rng: u32,
     /// Loudest output sample since the game last read it (diagnostics).
     pub peak: f32,
@@ -261,6 +264,7 @@ impl Default for Mixer {
             movie: None,
             music_volume: 0.55,
             sfx_volume: 0.9,
+            levels: Levels::default(),
             rng: 0x1234_5678,
             peak: 0.0,
         }
@@ -347,15 +351,16 @@ impl Mixer {
                 let r = ((e.rpm - e.idle_rpm) / (e.max_rpm - e.idle_rpm).max(1.0)).clamp(0.0, 1.0);
                 let vol = (e.volume.0 + (e.volume.1 - e.volume.0) * (0.5 * e.load + 0.5 * r)) * if s.active { 0.8 } else { 0.35 };
                 let a = e.accel.sample(e.rpm, &mut rng);
-                fx += match &mut e.decel {
-                    Some(d) => {
-                        let b = d.sample(e.rpm, &mut rng);
-                        (a * (0.3 + 0.7 * e.load) + b * (1.0 - e.load) * 0.8) * vol
-                    }
-                    None => a * (0.45 + 0.55 * e.load) * vol,
-                };
+                fx += self.levels.engine
+                    * match &mut e.decel {
+                        Some(d) => {
+                            let b = d.sample(e.rpm, &mut rng);
+                            (a * (0.3 + 0.7 * e.load) + b * (1.0 - e.load) * 0.8) * vol
+                        }
+                        None => a * (0.45 + 0.55 * e.load) * vol,
+                    };
             }
-            fx += self.nitro.next() + self.skid.next() + self.wind.next() + self.road.next();
+            fx += self.nitro.next() + self.skid.next() * self.levels.tires + self.wind.next() + self.road.next() * self.levels.tires;
             self.shots.retain_mut(|v| match v.next() {
                 Some(x) => {
                     fx += x;
@@ -363,25 +368,50 @@ impl Mixer {
                 }
                 None => false,
             });
-            fx *= self.sfx_volume;
+            fx *= self.sfx_volume * self.levels.effects;
             let (mut l, mut r) = (fx, fx);
             if let Some(m) = &mut music {
                 if m.len() >= 2 {
-                    l += m.pop_front().unwrap_or(0.0) * self.music_volume;
-                    r += m.pop_front().unwrap_or(0.0) * self.music_volume;
+                    let g = self.music_volume * self.levels.music;
+                    l += m.pop_front().unwrap_or(0.0) * g;
+                    r += m.pop_front().unwrap_or(0.0) * g;
                 }
             }
             if let Some(m) = &mut movie {
                 if m.len() >= 2 {
-                    l += m.pop_front().unwrap_or(0.0);
-                    r += m.pop_front().unwrap_or(0.0);
+                    l += m.pop_front().unwrap_or(0.0) * self.levels.speech;
+                    r += m.pop_front().unwrap_or(0.0) * self.levels.speech;
                 }
+            }
+            l *= self.levels.master;
+            r *= self.levels.master;
+            if self.levels.mono {
+                let m = (l + r) * 0.5;
+                l = m;
+                r = m;
             }
             frame[0] = soft_clip(l);
             frame[1] = soft_clip(r);
             self.peak = self.peak.max(frame[0].abs()).max(frame[1].abs());
         }
         self.rng = rng;
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Levels {
+    pub master: f32,
+    pub music: f32,
+    pub speech: f32,
+    pub effects: f32,
+    pub tires: f32,
+    pub engine: f32,
+    pub mono: bool,
+}
+
+impl Default for Levels {
+    fn default() -> Self {
+        Self { master: 1.0, music: 1.0, speech: 1.0, effects: 1.0, tires: 1.0, engine: 1.0, mono: false }
     }
 }
 
