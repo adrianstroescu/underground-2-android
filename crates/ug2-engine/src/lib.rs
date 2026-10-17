@@ -858,6 +858,10 @@ impl Game {
                 self.fe.open_quick_race_modes();
                 true
             }
+            Some(fe::FeKind::StartCareer) => {
+                self.fe.open_main_menu();
+                true
+            }
             Some(fe::FeKind::Pause) => {
                 self.set_paused(false);
                 true
@@ -985,7 +989,27 @@ impl Game {
 
     fn fe_action(&mut self, a: fe::FeAction) {
         let row = match a {
-            fe::FeAction::Career => frontend::Row::Career,
+            fe::FeAction::Career => {
+                let in_progress = self.career.as_ref().is_some_and(|c| !c.won.is_empty() || c.owned.len() > 1);
+                if !self.fe.open_start_career(in_progress) {
+                    self.fe_go(frontend::Row::Career);
+                }
+                return;
+            }
+            fe::FeAction::ResumeCareer => frontend::Row::Career,
+            fe::FeAction::NewCareer => {
+                if self.career.as_ref().is_some_and(|c| !c.won.is_empty() || c.owned.len() > 1) {
+                    // Starting over would erase the saved career: needs the game's
+                    // confirmation dialog (not done yet).
+                    log::info!("new career: a career is in progress");
+                    return;
+                }
+                frontend::Row::Career
+            }
+            fe::FeAction::LoadGame => {
+                log::info!("load game is not available");
+                return;
+            }
             fe::FeAction::QuickRace => {
                 self.fe.open_quick_race_modes();
                 return;

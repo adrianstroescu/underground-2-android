@@ -42,6 +42,10 @@ pub enum FeAction {
     /// The help bar's Customize button (car select).
     CustomizeCar,
     /// Pause menu (speed2.exe 0x4c2bd2 race, 0x4c2902 free run).
+    /// Career menu (UI_StartCareer).
+    ResumeCareer,
+    NewCareer,
+    LoadGame,
     /// Online / LAN play (no network game here).
     Online,
     ProfileManager,
@@ -65,6 +69,7 @@ pub enum FeKind {
     Pause,
     PauseOptionsMain,
     PauseOptions,
+    StartCareer,
 }
 
 /// Cars a new profile has in quick race (speed2.exe table 0x7f7c08); the others unlock
@@ -199,6 +204,7 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::QuickRaceMode | FeKind::QuickRaceTrack | FeKind::QuickRaceOptions | FeKind::OptionsMain => 0x405,
         FeKind::QuickRaceCar => 0x1405,
         FeKind::Options => 0x401,
+        FeKind::StartCareer => 0x405,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -350,6 +356,25 @@ impl Frontend {
         let ok = self.open_list("UI_QRModeOptions.fng", FeKind::QuickRaceOptions, 0x4759_7606, rows, ListKind::QuickRace { mode, race });
         if let Some(l) = self.screen.as_mut().and_then(|s| s.list.as_mut()) {
             qr_constrain(l);
+        }
+        ok
+    }
+
+    /// The career menu (UI_StartCareer, speed2.exe 0x4af110): Resume Career when a
+    /// career is under way, else Start New Career; then Load Game.
+    pub fn open_start_career(&mut self, in_progress: bool) -> bool {
+        let mut options = Vec::new();
+        if in_progress {
+            options.push(opt(0xa230_cd88, 0xe072_db21, FeAction::ResumeCareer));
+        }
+        options.push(opt(0x3cb9_2e26, 0x97b1_dcda, FeAction::NewCareer));
+        options.push(opt(0x72c8_7f3c, 0xaa3f_09d8, FeAction::LoadGame));
+        let ok = self.open_icon_menu("UI_StartCareer.fng", FeKind::StartCareer, options);
+        // The header reads "Career".
+        if let (Some(s), Some(d)) = (self.screen.as_mut(), self.data.as_ref()) {
+            if let Some(i) = s.scene.index_of(0x42ad_b44c) {
+                s.scene.states[i].text = d.strings.by_hash(0x5e7e_1192).map(str::to_string);
+            }
         }
         ok
     }
