@@ -807,6 +807,24 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     for p in find_tpks(&globala) {
         p.textures.iter().for_each(|t| take(t, &mut out));
     }
+    // The pause menu and in-game dialogs (GLOBAL/InGameCommon.bun).
+    if let Ok(ig) = game.read("GLOBAL/InGameCommon.bun") {
+        let pk = ug2_formats::feng::packages(&ig);
+        let mut need: HashSet<u32> = HashSet::new();
+        for p in &pk {
+            for r in &p.resources {
+                need.insert(bin_hash(&r.texture_name()));
+            }
+        }
+        for p in find_tpks(&ig) {
+            for t in &p.textures {
+                if need.contains(&t.hash) || t.name.starts_with("INGAME_ICON") {
+                    take(t, &mut out);
+                }
+            }
+        }
+        packages.extend(pk);
+    }
     let mut cars = Vec::new();
     let mut ratings = HashMap::new();
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {

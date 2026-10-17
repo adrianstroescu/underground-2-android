@@ -806,14 +806,26 @@ impl Game {
 
     /// The original main menu replaces the title menu once the frontend data is in.
     fn fe_active(&self) -> bool {
-        self.fe.screen.is_some() && self.screen == Screen::Title && self.menu_visible()
+        self.fe.screen.is_some() && self.menu_visible() && (self.screen == Screen::Title || (self.screen == Screen::Playing && self.paused))
+    }
+
+    /// Runs one of the port's own menu rows on the current screen (pause actions).
+    fn fe_row(&mut self, row: frontend::Row) {
+        if let Some(i) = self.rows().iter().position(|r| *r == row) {
+            self.menu_action(menu::MenuHit::Activate(i));
+        }
     }
 
     fn update_fe(&mut self, dt: f32) {
-        let want = self.screen == Screen::Title && self.menu_visible() && self.fe.ready();
-        if want && self.fe.screen.is_none() {
+        let ready = self.menu_visible() && self.fe.ready();
+        let title = self.screen == Screen::Title && ready;
+        let pause = self.screen == Screen::Playing && self.paused && ready;
+        if title && (self.fe.screen.is_none() || self.fe.in_pause()) {
             self.fe.open_main_menu();
-        } else if !want && self.fe.screen.is_some() {
+        } else if pause && !self.fe.in_pause() {
+            let race = self.session.race().is_some();
+            self.fe.open_pause(race);
+        } else if !title && !pause && self.fe.screen.is_some() {
             self.fe.close();
         }
         // The car select shows the browsed car on the turntable.
@@ -844,6 +856,26 @@ impl Game {
             }
             Some(fe::FeKind::QuickRaceTrack) => {
                 self.fe.open_quick_race_modes();
+                true
+            }
+            Some(fe::FeKind::Pause) => {
+                self.set_paused(false);
+                true
+            }
+            Some(fe::FeKind::PauseOptionsMain) => {
+                let race = self.session.race().is_some();
+                self.fe.open_pause(race);
+                true
+            }
+            Some(fe::FeKind::PauseOptions) => {
+                if let Some((_, values)) = self.fe.options_values() {
+                    for (k, v) in values {
+                        self.cfg.options.insert(k.to_string(), v);
+                    }
+                    self.cfg.save(&self.config_path);
+                    self.apply_options();
+                }
+                self.fe.open_pause_options_main();
                 true
             }
             Some(fe::FeKind::OptionsMain) => {
@@ -969,6 +1001,26 @@ impl Game {
                     // EA Trax and Credits are not done yet.
                     log::info!("options category {c} not available");
                 }
+                return;
+            }
+            fe::FeAction::Resume => {
+                self.set_paused(false);
+                return;
+            }
+            fe::FeAction::RestartRace => {
+                self.fe_row(frontend::Row::Restart);
+                return;
+            }
+            fe::FeAction::Replay => {
+                // Replays are not recorded yet.
+                return;
+            }
+            fe::FeAction::QuitToMenu => {
+                self.fe_row(frontend::Row::QuitToMenu);
+                return;
+            }
+            fe::FeAction::PauseOptions => {
+                self.fe.open_pause_options_main();
                 return;
             }
             fe::FeAction::Back => {

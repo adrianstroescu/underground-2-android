@@ -41,6 +41,12 @@ pub enum FeAction {
     Quit,
     /// The help bar's Customize button (car select).
     CustomizeCar,
+    /// Pause menu (speed2.exe 0x4c2bd2 race, 0x4c2902 free run).
+    Resume,
+    RestartRace,
+    Replay,
+    QuitToMenu,
+    PauseOptions,
 }
 
 /// Which original screen is up.
@@ -53,6 +59,9 @@ pub enum FeKind {
     QuickRaceCar,
     OptionsMain,
     Options,
+    Pause,
+    PauseOptionsMain,
+    PauseOptions,
 }
 
 /// Cars a new profile has in quick race (speed2.exe table 0x7f7c08); the others unlock
@@ -187,6 +196,8 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::QuickRaceMode | FeKind::QuickRaceTrack | FeKind::QuickRaceOptions | FeKind::OptionsMain => 0x405,
         FeKind::QuickRaceCar => 0x1405,
         FeKind::Options => 0x401,
+        FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
+        FeKind::PauseOptions => 0x10400,
     }
 }
 
@@ -337,6 +348,43 @@ impl Frontend {
         ok
     }
 
+    /// The pause menu (UI_Pause). In a race (speed2.exe 0x4c2bd2): Resume Race,
+    /// Restart, Options, Replay, Quit to Main Menu; in free run (0x4c2902): Return to
+    /// Free Run, Options, Replay, Quit to Main Menu.
+    pub fn open_pause(&mut self, race: bool) -> bool {
+        let quit = opt(bin_hash("INGAME_ICON_QUIT_TO_FE"), 0xc7e1_420c, FeAction::QuitToMenu);
+        let options_ = opt(bin_hash("INGAME_ICON_OPTIONS"), 0xb349_93c9, FeAction::PauseOptions);
+        let replay = opt(bin_hash("INGAME_ICON_REPLAY"), 0x7840_428a, FeAction::Replay);
+        let options = if race {
+            vec![
+                opt(bin_hash("INGAME_ICON_RESUME_RACE"), 0xf660_1088, FeAction::Resume),
+                opt(0xb295_a6b6, 0x8083_3fc2, FeAction::RestartRace),
+                options_,
+                replay,
+                quit,
+            ]
+        } else {
+            vec![opt(bin_hash("INGAME_ICON_EXPLORE"), 0xc44a_6515, FeAction::Resume), options_, replay, quit]
+        };
+        self.open_icon_menu("UI_Pause.fng", FeKind::Pause, options)
+    }
+
+    /// The pause menu's options (UI_PauseOptionsMain, speed2.exe 0x4c30b1): Audio,
+    /// Gameplay, Player.
+    pub fn open_pause_options_main(&mut self) -> bool {
+        let options = vec![
+            opt(0xf37a_f144, 0xe76c_d783, FeAction::OptionsCategory(0)),
+            opt(0x4df9_8fb2, 0xd0cf_6ee1, FeAction::OptionsCategory(2)),
+            opt(0xd708_efef, 0xf760_eabe, FeAction::OptionsCategory(3)),
+        ];
+        self.open_icon_menu("UI_PauseOptionsMain.fng", FeKind::PauseOptionsMain, options)
+    }
+
+    /// True on the pause screens.
+    pub fn in_pause(&self) -> bool {
+        matches!(self.kind(), Some(FeKind::Pause | FeKind::PauseOptionsMain | FeKind::PauseOptions))
+    }
+
     /// The Options categories (UI_OptionsMain, speed2.exe 0x4b6230). Display (PC
     /// resolution and detail) and the PC key bindings have no counterpart here yet.
     pub fn open_options_main(&mut self) -> bool {
@@ -353,6 +401,7 @@ impl Frontend {
     /// An Options category (UI_Options, rows from speed2.exe 0x4b8470) with the saved
     /// values (`get(key)`, default when missing).
     pub fn open_options(&mut self, category: u8, get: impl Fn(&str) -> Option<f32>) -> bool {
+        let pause = self.in_pause();
         let v = |k: &str, d: f32| get(k).unwrap_or(d);
         let off_on = |k: &'static str, label: u32, d: bool| Row::on_off(k, label, v(k, d as u8 as f32) != 0.0);
         let rows = match category {
@@ -431,6 +480,9 @@ impl Frontend {
             2 => 0xd0cf_6ee1,
             _ => 0xf760_eabe,
         };
+        if pause {
+            return self.open_list("UI_PauseOptions.fng", FeKind::PauseOptions, header, rows, ListKind::Options(category));
+        }
         self.open_list("UI_Options.fng", FeKind::Options, header, rows, ListKind::Options(category))
     }
 
