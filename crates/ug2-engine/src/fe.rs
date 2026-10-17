@@ -28,6 +28,8 @@ pub enum FeAction {
     Track(usize),
     /// Continue on the mode options screen.
     OptionsDone,
+    /// A car was chosen on the car select screen.
+    CarDone,
 }
 
 /// Which original screen is up.
@@ -37,6 +39,21 @@ pub enum FeKind {
     QuickRaceMode,
     QuickRaceTrack,
     QuickRaceOptions,
+    QuickRaceCar,
+}
+
+/// Cars a new profile has in quick race (speed2.exe table 0x7f7c08); the others unlock
+/// through the career.
+pub const STARTER_CARS: [&str; 8] = ["PEUGOT", "FOCUS", "COROLLA", "CIVIC", "ESCALADE", "GTO", "LANCEREVO8", "350Z"];
+
+/// The quick race car select (UI_QRCarSelect, speed2.exe 0x4f9d90): one car at a time
+/// with its manufacturer logo and name badge, the filter, and stat bars.
+struct CarSelect {
+    cars: Vec<(String, String)>,
+    selected: usize,
+    /// Seconds since the selection last changed (the car loads after 0.3 s).
+    settled: f32,
+    mode_label: u32,
 }
 
 /// Settings of one quick race mode. speed2.exe keeps one record per mode (0x83aac4 +
@@ -165,6 +182,7 @@ pub struct FeScreen {
     pub kind: FeKind,
     menu: IconMenu,
     list: Option<OptionList>,
+    car: Option<CarSelect>,
 }
 
 #[derive(Default)]
@@ -336,10 +354,55 @@ impl Frontend {
         menu.hidden = hidden;
         let mut list = OptionList { keys, rows, selected: 0, top: 0, shown: None, title, data: data_rect, settings, mode, race };
         list.constrain();
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceOptions, menu, list: Some(list) };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceOptions, menu, list: Some(list), car: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
+    }
+
+    /// Quick race car select. `cars` are (car type, manufacturer) in the list's order;
+    /// `current` is selected first.
+    pub fn open_car_select(&mut self, cars: Vec<(String, String)>, current: &str, mode_label: u32) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_QRCarSelect.fng")) else { return false };
+        let mut scene = Scene::new(pkg.clone());
+        scene.advance(1.0);
+        scene.send_named("CALL PACKAGE");
+        scene.send_named("CALL FRAMES");
+        let find = |n: &str| scene.index_of(h(n));
+        let mut menu = IconMenu::default();
+        menu.hidden.extend(["_EVENT_HANDLER_", "CarLevel_Debug"].into_iter().filter_map(find));
+        menu.arrows = [find("ScrollBar_Arrow_1"), find("ScrollBar_Arrow_2")];
+        let header = find("HEADER_TEXT");
+        for i in menu.arrows.into_iter().flatten() {
+            scene.set_script(i, h("static"));
+        }
+        if let Some(i) = header {
+            // "Quick Race Car Select".
+            scene.states[i].text = data.strings.by_hash(0x5ac1_fb59).map(str::to_string);
+        }
+        let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
+        let car = CarSelect { cars, selected, settled: 0.0, mode_label };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, car: Some(car) };
+        s.apply(&data.strings);
+        s.apply_car(&data.strings, &data.textures);
+        self.screen = Some(s);
+        true
+    }
+
+    /// The car on the car select screen.
+    pub fn selected_car(&self) -> Option<&str> {
+        let c = self.screen.as_ref()?.car.as_ref()?;
+        c.cars.get(c.selected).map(|(n, _)| n.as_str())
+    }
+
+    /// The car to show on the turntable: the selection once it has rested 0.3 s.
+    pub fn wanted_car(&self) -> Option<&str> {
+        let c = self.screen.as_ref()?.car.as_ref()?;
+        if c.settled < 0.3 {
+            return None;
+        }
+        c.cars.get(c.selected).map(|(n, _)| n.as_str())
     }
 
     /// The settings on the options screen.
@@ -423,7 +486,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, car: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -436,17 +499,34 @@ impl Frontend {
     pub fn update(&mut self, dt: f32) {
         let (Some(s), Some(data)) = (&mut self.screen, &self.data) else { return };
         s.scene.advance(dt * 1000.0);
+        if let Some(c) = &mut s.car {
+            c.settled += dt;
+        }
         let target = s.menu.selected as f32;
         let step = dt / SCROLL_TIME;
         let d = target - s.menu.scroll;
         s.menu.scroll = if d.abs() <= step { target } else { s.menu.scroll + d.signum() * step.max(d.abs() * dt * 8.0) };
         s.apply(&data.strings);
+        s.apply_car(&data.strings, &data.textures);
     }
 
     /// Steps the selection (left / right); on a list screen, changes the highlighted
     /// row's value. True when something moved.
     pub fn step(&mut self, delta: i32) -> bool {
         let Some(s) = &mut self.screen else { return false };
+        if let Some(c) = &mut s.car {
+            // No wrap (speed2.exe 0x4e2590).
+            let next = (c.selected as i32 + delta).clamp(0, c.cars.len() as i32 - 1) as usize;
+            if next == c.selected {
+                return false;
+            }
+            c.selected = next;
+            c.settled = 0.0;
+            if let Some(a) = if delta < 0 { s.menu.arrows[0] } else { s.menu.arrows[1] } {
+                s.scene.set_script(a, h("Blink"));
+            }
+            return true;
+        }
         if let Some(l) = &mut s.list {
             let changed = l.change(delta);
             if changed {
@@ -475,6 +555,9 @@ impl Frontend {
         if s.list.is_some() {
             return Some(FeAction::OptionsDone);
         }
+        if s.car.is_some() {
+            return Some(FeAction::CarDone);
+        }
         Some(s.menu.options.get(s.menu.selected)?.action)
     }
 
@@ -484,6 +567,26 @@ impl Frontend {
         let (vx, vy) = to_virtual(x, y, size);
         if self.screen.as_ref()?.list.is_some() {
             return self.tap_list(vx, vy);
+        }
+        if self.screen.as_ref()?.car.is_some() {
+            // The scroll arrows step; the car (badge, logo or the turntable) accepts.
+            let s = self.screen.as_ref()?;
+            let near = |i: usize, r: f32| {
+                let d = s.scene.values(i);
+                (vx - d[7] - 320.0).abs() < r && (vy - d[8] - 240.0).abs() < r
+            };
+            if s.menu.arrows[0].is_some_and(|a| near(a, 40.0)) {
+                self.step(-1);
+                return None;
+            }
+            if s.menu.arrows[1].is_some_and(|a| near(a, 40.0)) {
+                self.step(1);
+                return None;
+            }
+            if vy > 140.0 && vy < 380.0 && (vx - 320.0).abs() < 200.0 {
+                return Some(FeAction::CarDone);
+            }
+            return None;
         }
         let s = self.screen.as_ref()?;
         let near = |i: usize, r: f32| {
@@ -705,6 +808,43 @@ impl FeScreen {
                 st[i].hidden = Some(!visible);
                 // The group's box sits at (−17, 1) inside it.
                 st[i].position = Some([row_cx + 17.0, y + th * 0.5 - 1.0]);
+            }
+        }
+    }
+
+    /// Car select (speed2.exe 0x511e60 / 0x4b2310): the logo is
+    /// CARSELECT_MANUFACTURER_<make>, the name badge SECONDARY_LOGO_<car type>
+    /// (GENERICPLACEHOLDER when missing); the end arrows hide at the ends of the list.
+    fn apply_car(&mut self, strings: &ug2_formats::lang::Strings, textures: &std::collections::HashSet<u32>) {
+        let Some(c) = &self.car else { return };
+        let Some((name, make)) = c.cars.get(c.selected) else { return };
+        let tex = |n: String| {
+            let t = bin_hash(&n.to_ascii_uppercase());
+            if textures.contains(&t) {
+                t
+            } else {
+                bin_hash("GENERICPLACEHOLDER")
+            }
+        };
+        let (logo, badge) = (tex(format!("CARSELECT_MANUFACTURER_{make}")), tex(format!("SECONDARY_LOGO_{name}")));
+        let set_tex = |scene: &mut Scene, n: &str, t: u32| {
+            if let Some(i) = scene.index_of(h(n)) {
+                scene.states[i].texture = Some(t);
+            }
+        };
+        set_tex(&mut self.scene, "ManufacturerLogo", logo);
+        set_tex(&mut self.scene, "CarBadge", badge);
+        // "All Cars" (filter 3: stock and own cars).
+        if let Some(i) = self.scene.index_of(0x3e81_de59) {
+            self.scene.states[i].text = strings.by_hash(0x6b68_362c).map(str::to_string);
+        }
+        if let Some(i) = self.scene.index_of(h("RaceMode_DATA")) {
+            self.scene.states[i].text = strings.by_hash(c.mode_label).map(str::to_string);
+        }
+        let n = c.cars.len();
+        for (k, hidden) in [(0, c.selected == 0), (1, c.selected + 1 >= n)] {
+            if let Some(a) = self.menu.arrows[k] {
+                self.scene.states[a].hidden = Some(hidden);
             }
         }
     }

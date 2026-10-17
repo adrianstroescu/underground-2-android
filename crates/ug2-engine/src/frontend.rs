@@ -196,7 +196,7 @@ impl Game {
     }
 
     /// Name of the car the player drives (or is about to).
-    fn current_car(&self) -> String {
+    pub(crate) fn current_car(&self) -> String {
         self.pending_car.as_ref().or(self.player_car.as_ref()).map(|k| car_name(k).to_string()).unwrap_or_default()
     }
 
@@ -689,7 +689,7 @@ impl Game {
     }
 
     /// Picks opponents and starts loading their cars; the race begins once they are in.
-    fn prepare_race(&mut self) {
+    pub(crate) fn prepare_race(&mut self) {
         let Some(race) = self.quick.chosen.clone().or_else(|| self.selected_race().cloned()) else { return };
         let player = self.current_car();
         let mut pool: Vec<String> = self.racers.iter().filter(|r| **r != player).cloned().collect();

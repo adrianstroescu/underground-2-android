@@ -815,6 +815,12 @@ impl Game {
         } else if !want && self.fe.screen.is_some() {
             self.fe.close();
         }
+        // The car select shows the browsed car on the turntable.
+        if let Some(name) = self.fe.wanted_car().map(str::to_string) {
+            if self.current_car() != name {
+                self.select_car(name);
+            }
+        }
         // Track maps load when a track is first shown.
         if let Some(t) = self.fe.wanted_texture() {
             if self.fe_requested.insert(t) {
@@ -839,6 +845,12 @@ impl Game {
                 self.fe.open_quick_race_modes();
                 true
             }
+            Some(fe::FeKind::QuickRaceCar) => {
+                let mode = self.quick.chosen.as_ref().map(|r| r.mode);
+                let settings = self.quick.settings[frontend::QuickRace::slot(mode)];
+                self.fe.open_mode_options(mode, self.quick.chosen.clone(), settings);
+                true
+            }
             Some(fe::FeKind::QuickRaceOptions) => {
                 match self.quick.chosen.as_ref().map(|r| r.mode) {
                     Some(m) => self.open_qr_tracks(m),
@@ -850,6 +862,34 @@ impl Game {
             }
             _ => false,
         }
+    }
+
+    /// The original car select: the racer car types in GLOBALB order, without the ones
+    /// the North American release leaves out (speed2.exe 0x5022c0), those with no model
+    /// installed and those still locked (the starter set, plus the career's cars and the
+    /// car in use).
+    fn open_qr_cars(&mut self) {
+        let Some(data) = &self.fe.data else { return };
+        let current = self.current_car();
+        let owned: Vec<String> = self.career.as_ref().map(|c| c.owned.clone()).unwrap_or_default();
+        let cars: Vec<(String, String)> = data
+            .cars
+            .iter()
+            .filter(|(n, _)| !matches!(n.as_str(), "CORSA" | "PEUGOT106"))
+            .filter(|(n, _)| self.racers.iter().any(|r| r == n))
+            .filter(|(n, _)| fe::STARTER_CARS.contains(&n.as_str()) || owned.contains(n) || *n == current)
+            .cloned()
+            .collect();
+        let mode_label = match self.quick.chosen.as_ref().map(|r| r.mode) {
+            Some(roads::Mode::Circuit) => 0x93fd_ee74,
+            Some(roads::Mode::Sprint) => 0xdcb9_f861,
+            Some(roads::Mode::Drag) => 0x3510_2edf,
+            Some(roads::Mode::Drift) => 0xd716_2cfa,
+            Some(roads::Mode::StreetX) => 0x30da_61e1,
+            Some(roads::Mode::Url) => 0xc786_c4e7,
+            None => 0x6f24_21b7,
+        };
+        self.fe.open_car_select(cars, &current, mode_label);
     }
 
     /// The original track select for a mode: each track once, named by the mode's
@@ -916,7 +956,7 @@ impl Game {
                 // Traffic: None turns it off (the density levels are not decoded yet).
                 self.session.traffic_on = s.traffic > 0;
                 let Some(mut race) = self.quick.chosen.clone() else {
-                    self.fe_go(frontend::Row::FreeRoam);
+                    self.open_qr_cars();
                     return;
                 };
                 if race.reversible {
@@ -926,8 +966,21 @@ impl Game {
                 self.quick.opponents = s.opponents as usize;
                 log::info!("quick race {} {:?} reverse {} laps {} opponents {} {:?}", race.track, race.mode, race.reverse, self.quick.laps, s.opponents, s);
                 self.quick.chosen = Some(race);
-                // The car select screen is still the port's own.
-                frontend::Row::QuickRace
+                self.open_qr_cars();
+                return;
+            }
+            fe::FeAction::CarDone => {
+                let Some(name) = self.fe.selected_car().map(str::to_string) else { return };
+                self.cfg.car = name.clone();
+                self.cfg.save(&self.config_path);
+                if self.current_car() != name {
+                    self.select_car(name);
+                }
+                if self.quick.chosen.is_some() {
+                    self.prepare_race();
+                    return;
+                }
+                frontend::Row::FreeRoam
             }
         };
         self.fe_go(row);

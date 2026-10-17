@@ -69,6 +69,9 @@ impl Drivetrain {
 #[derive(Clone, Debug)]
 pub struct CarTypeInfo {
     pub name: String,
+    /// Manufacturer (+0xC0), e.g. "NISSAN": the car select logo is
+    /// CARSELECT_MANUFACTURER_<it>.
+    pub manufacturer: String,
     pub wheels: [WheelInfo; 4],
     pub usage: CarUsage,
     pub drivetrain: Drivetrain,
@@ -115,7 +118,7 @@ pub fn parse_car_types(global_b: &[u8]) -> Result<Vec<CarTypeInfo>> {
         for i in 0..9 {
             d.turbo[i] = f(0x334 + 4 * i)? * 1000.0;
         }
-        out.push(CarTypeInfo { name: cstr_at(rec, 0, 32)?, wheels, usage, drivetrain: d });
+        out.push(CarTypeInfo { name: cstr_at(rec, 0, 32)?, manufacturer: cstr_at(rec, 0xC0, 32)?, wheels, usage, drivetrain: d });
     }
     Ok(out)
 }

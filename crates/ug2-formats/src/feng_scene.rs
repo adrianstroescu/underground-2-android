@@ -30,6 +30,8 @@ pub struct ObjectState {
     pub position: Option<[f32; 2]>,
     /// Multiplies the object's colour (RGBA 0..255).
     pub tint: Option<[u8; 4]>,
+    /// Size (x, y) replacing the scripted one.
+    pub size: Option<[f32; 2]>,
 }
 
 pub struct Scene {
@@ -71,7 +73,7 @@ impl Scene {
         let states = package
             .objects
             .iter()
-            .map(|_| ObjectState { script: INIT, time: 0.0, running: true, text: None, hidden: None, texture: None, position: None, tint: None })
+            .map(|_| ObjectState { script: INIT, time: 0.0, running: true, text: None, hidden: None, texture: None, position: None, tint: None, size: None })
             .collect();
         Self { package, states, to_game: Vec::new(), active_button: None }
     }
@@ -203,6 +205,10 @@ impl Scene {
         if let Some([x, y]) = self.states[i].position {
             d[field::POSITION] = x;
             d[field::POSITION + 1] = y;
+        }
+        if let Some([x, y]) = self.states[i].size {
+            d[field::SIZE] = x;
+            d[field::SIZE + 1] = y;
         }
         if let Some(t) = self.states[i].tint {
             // B, G, R, A words.

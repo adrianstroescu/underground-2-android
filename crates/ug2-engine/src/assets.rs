@@ -761,6 +761,10 @@ pub struct FrontendData {
     pub packages: Vec<ug2_formats::feng::Package>,
     pub strings: ug2_formats::lang::Strings,
     pub fonts: Vec<ug2_formats::font::Font>,
+    /// Name hashes of every frontend texture loaded.
+    pub textures: HashSet<u32>,
+    /// Racer car types in GLOBALB order: (name, manufacturer).
+    pub cars: Vec<(String, String)>,
 }
 
 /// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
@@ -801,7 +805,15 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     for p in find_tpks(&globala) {
         p.textures.iter().for_each(|t| take(t, &mut out));
     }
+    let mut cars = Vec::new();
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
+        if let Ok(types) = ug2_formats::carinfo::parse_car_types(&gb) {
+            cars = types
+                .iter()
+                .filter(|t| t.usage == ug2_formats::carinfo::CarUsage::Racer)
+                .map(|t| (t.name.clone(), t.manufacturer.clone()))
+                .collect();
+        }
         for p in find_tpks(&gb) {
             for t in &p.textures {
                 if wanted.contains(&t.hash) || t.name.contains("ICON") || t.name.starts_with("U2_") || t.name.starts_with("CARSELECT_") || t.name.starts_with("SECONDARY_LOGO") {
@@ -811,8 +823,9 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         }
     }
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
+    let textures = opaque.iter().map(|(h, _)| *h).collect();
     let _ = tx.send(LoadEvent::FeTextures(out, opaque));
-    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts })));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars })));
     Ok(())
 }
 
