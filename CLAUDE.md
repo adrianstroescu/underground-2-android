@@ -388,6 +388,19 @@ shares the scene depth. Per frame, in this order:
   from nearby lights: 21 different sets in one frame.
 - The envmap is a gradient; the game renders a 128 px cube map.
 
+### Car physics (speed2.exe PhysicsMover, being re-implemented)
+
+- The player uses the full PhysicsMover (vtable 0x7a25e0, update 0x5b72d0); AI and
+  traffic may use the MellowMover. Frame dt is split into n = trunc(dt/0.0044)+1
+  explicit-Euler substeps. Units: t, kN, kN·m, t·m², rad/s. A physics-struct offset X
+  is CarTypeInfo record offset X + 0x110 (`ug2-formats/carphysics.rs`).
+- Engine, clutch, gearbox and drive split: `ug2-engine/powertrain.rs` (addresses in its
+  header). The clutch state machine sets the throttle scale per state (0 / 0 / 0.7 / 1);
+  a new car starts in neutral, clutch 0, engaging. Upshift quality (0x594f20, windows
+  0x7fbf60 by skill row +0xf0 = 3) gives the drag "perfect shift" throttle bonus
+  (1 + 2·q fading over 0.5 s); a drag shift outside clutch state 1 is a missed shift
+  (no throttle 0.45 s). Who puts the drag clutch in state 1 is not traced yet.
+
 ### Gameplay data
 
 - Race lines come from `Routes<track><F|B>.bin`, chained by race distance

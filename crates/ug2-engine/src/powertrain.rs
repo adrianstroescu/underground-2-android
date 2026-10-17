@@ -20,9 +20,8 @@ pub const MAX_SUBSTEP: f32 = 0.0044;
 /// Wheel inertia, t·m² (0x7fc6f0, set by 0x5ab990).
 pub const WHEEL_INERTIA: f32 = 0.01;
 
-/// Clutch rate per state (0x7fc298) and the throttle scale each state sets (0x5a1400).
+/// Clutch rate per state (0x7fc298).
 const CLUTCH_RATE: [f32; 4] = [-3.0, 0.0, 1.5, 0.0];
-const THROTTLE_SCALE: [f32; 4] = [0.0, 0.0, 0.7, 1.0];
 /// Slipping clutch speed difference clamp, rad/s (0x7fbf34).
 const SLIP_CLAMP: f32 = 300.0;
 /// Clutch locks when engine and wheel side are this close, rad/s (0x7fc028).
@@ -94,7 +93,27 @@ pub struct Powertrain {
     offsets: [f32; 3],
     last_diff: f32,
     rng: u32,
+    /// Drag race gearbox (+0x60 = 3): the driver shifts, the clutch never slips.
+    pub drag: bool,
+    /// Shift window row (+0xf0, 3 by default).
+    pub shift_skill: usize,
+    /// Physics time, s, and the missed-shift (+0x5c) and shift bonus (+0x64 / +0x68) timers.
+    time: f32,
+    missed_time: f32,
+    /// Quality of the last upshift (see [`Powertrain::shift_quality`]).
+    pub bonus: f32,
+    bonus_time: f32,
+    /// Engine rpm when the last shift began (+0x6c).
+    shift_start_rpm: f32,
 }
+
+/// Upshift timing windows, rpm, by skill row and gear index (0x7fbf60).
+const SHIFT_WINDOWS: [[f32; 9]; 4] = [
+    [0.0, 560.0, 360.0, 175.0, 160.0, 140.0, 140.0, 0.0, 0.0],
+    [0.0, 600.0, 400.0, 230.0, 220.0, 160.0, 160.0, 0.0, 0.0],
+    [0.0, 850.0, 550.0, 300.0, 250.0, 200.0, 180.0, 0.0, 0.0],
+    [0.0, 1100.0, 750.0, 400.0, 325.0, 290.0, 230.0, 0.0, 0.0],
+];
 
 impl Powertrain {
     pub fn new(data: CarPhysics) -> Self {
@@ -103,7 +122,9 @@ impl Powertrain {
         // Shift points (0x5ac7d0).
         let mut up = vec![0.0; ng + 2];
         let mut down = vec![0.0; ng + 2];
-        up[NEUTRAL] = idle + (red - idle) * data.first_shift;
+        // The neutral -> first point scales by the drive type (0x7fc2a8 + 0x144*type, +0x10).
+        let drive_type = if data.rear_bias < 0.2 { 1.0 } else if data.rear_bias > 0.8 { 1.1 } else { 1.2 };
+        up[NEUTRAL] = (idle + (red - idle) * data.first_shift) * drive_type;
         for u in up.iter_mut().take(ng + 1).skip(FIRST) {
             *u = red - 100.0;
         }
@@ -120,8 +141,8 @@ impl Powertrain {
             limiter: false,
             heat: None,
             blown: false,
-            clutch: 1.0,
-            state: Clutch::Engaged,
+            clutch: 0.0,
+            state: Clutch::Engaging,
             gear: NEUTRAL,
             target: NEUTRAL,
             shifting: false,
@@ -132,6 +153,13 @@ impl Powertrain {
             offsets: [0.0; 3],
             last_diff: 0.0,
             rng: 0x1d87_2b41,
+            drag: false,
+            shift_skill: 3,
+            time: 0.0,
+            missed_time: 0.0,
+            bonus: 0.0,
+            bonus_time: 0.0,
+            shift_start_rpm: 0.0,
             data,
         };
         p.roll_offsets();
@@ -182,8 +210,28 @@ impl Powertrain {
             th = 0.5;
         }
         self.throttle = if self.blown { 0.0 } else { th };
-        if let Some(g) = request {
-            self.target = g.min(self.top_gear());
+        if let Some(req) = request {
+            let req = req.min(self.top_gear());
+            if self.drag {
+                if req != self.gear {
+                    if self.state != Clutch::Disengaged {
+                        // Shifting with the clutch in: a missed shift.
+                        self.shifting = false;
+                        self.missed_time = self.time;
+                    } else if !self.shifting {
+                        self.shifting = true;
+                        self.target = req;
+                        if req > self.gear {
+                            self.on_upshift(self.shift_start_rpm);
+                        }
+                    }
+                }
+            } else if req != self.gear && req != self.target {
+                self.target = req;
+                if req > self.gear {
+                    self.on_upshift(self.shift_rpm);
+                }
+            }
             return;
         }
         let g = self.gear;
@@ -195,13 +243,18 @@ impl Powertrain {
             return;
         }
         let rpm = self.shift_rpm;
-        if g < self.top_gear() && rpm >= self.upshift_rpm(g, false) && wheels_ok {
-            self.target = g + 1;
+        if rpm >= self.upshift_rpm(g, false) && g < self.top_gear() {
+            if wheels_ok {
+                self.target = g + 1;
+            }
         } else if g > FIRST {
             let low = self.upshift_rpm(g - 1, true) * self.data.gears[g] / self.data.gears[g - 1] - 200.0;
             if rpm <= self.down[g] + self.offsets[2] && rpm <= low {
                 self.target = g - 1;
             }
+        }
+        if self.state == Clutch::Engaged && self.target > g {
+            self.on_upshift(rpm);
         }
     }
 
@@ -319,7 +372,8 @@ impl Powertrain {
     /// End of a substep: clutch, engine clamp and limiter, heat, clutch state machine.
     pub fn post_step(&mut self, h: f32) {
         // Clutch position (0x5949b0).
-        self.clutch = (self.clutch + self.data.clutch_rate * CLUTCH_RATE[self.state as usize] * h).clamp(0.0, 1.0);
+        let rate = if self.drag { 0.0 } else { self.data.clutch_rate * CLUTCH_RATE[self.state as usize] };
+        self.clutch += rate * h;
         // Engine (0x5aa760).
         let d = &self.data;
         self.w = self.w.clamp(d.idle_rpm * RAD_K, d.max_rpm * RAD_K);
@@ -336,47 +390,130 @@ impl Powertrain {
                 self.blown = true;
             }
         }
-        // Clutch state machine (0x5a1400).
-        let declutch = self.gear != NEUTRAL && self.throttle < 0.3 && self.wheel_side <= d.idle_rpm * RAD_K;
-        match self.state {
-            Clutch::Engaged => {
-                if self.gear != self.target {
-                    self.shifting = true;
-                    self.state = Clutch::Disengaging;
-                } else {
-                    self.shifting = false;
-                    if declutch {
+        self.time += h;
+        self.clutch_states();
+    }
+
+    /// Engine and wheel side within 50 rad/s (0x594ed0).
+    fn can_lock(&self) -> bool {
+        (self.w - self.wheel_side).abs() <= LOCK_DIFF
+    }
+
+    /// Off the throttle with the wheels slower than idle: the clutch comes out (0x594e90).
+    fn declutch(&self) -> bool {
+        self.throttle < 0.3 && self.data.idle_rpm * RAD_K + 0.0001 >= self.wheel_side
+    }
+
+    /// The clutch state machine (0x5a1400); each state sets the throttle scale first.
+    fn clutch_states(&mut self) {
+        if self.drag {
+            // Drag: the clutch stays in; a requested shift happens in state 1.
+            self.scale = 1.0;
+            if self.state == Clutch::Engaged {
+                self.shift_start_rpm = self.rpm();
+                if self.bonus > 0.0 && self.bonus_time == 0.0 {
+                    self.bonus_time = self.time;
+                }
+            } else if self.state == Clutch::Disengaged && self.shifting {
+                self.shifting = false;
+                self.gear = self.target;
+            }
+        } else {
+            match self.state {
+                Clutch::Engaged => {
+                    if self.bonus > 0.0 && self.bonus_time == 0.0 {
+                        self.bonus_time = self.time;
+                    }
+                    self.scale = 1.0;
+                    if self.gear != NEUTRAL && self.declutch() {
+                        self.state = Clutch::Disengaging;
+                    }
+                    if self.gear != self.target {
+                        self.shifting = true;
+                        self.state = Clutch::Disengaging;
+                        self.shift_start_rpm = self.rpm();
+                    } else {
+                        self.shifting = false;
+                    }
+                }
+                Clutch::Engaging => {
+                    self.scale = 0.7;
+                    if self.clutch >= 1.0 {
+                        self.clutch = 1.0;
+                        if self.can_lock() || self.gear == NEUTRAL {
+                            self.state = Clutch::Engaged;
+                        }
+                    }
+                    if self.declutch() && self.gear != NEUTRAL {
                         self.state = Clutch::Disengaging;
                     }
                 }
-            }
-            Clutch::Disengaging => {
-                if self.clutch <= 0.0 {
-                    self.clutch = 0.0;
-                    self.state = Clutch::Disengaged;
+                Clutch::Disengaging => {
+                    self.scale = 0.0;
+                    if self.clutch <= 0.0 {
+                        self.clutch = 0.0;
+                        self.state = Clutch::Disengaged;
+                    }
                 }
-            }
-            Clutch::Disengaged => {
-                if self.gear != self.target {
+                Clutch::Disengaged => {
+                    self.scale = 0.0;
                     self.gear = self.target;
-                    self.roll_offsets();
-                }
-                if !declutch {
-                    self.state = Clutch::Engaging;
-                }
-            }
-            Clutch::Engaging => {
-                if declutch {
-                    self.state = Clutch::Disengaging;
-                } else if self.clutch >= 1.0 {
-                    self.clutch = 1.0;
-                    if (self.w - self.wheel_side).abs() < LOCK_DIFF || self.gear == NEUTRAL {
-                        self.state = Clutch::Engaged;
+                    if self.shifting || !self.declutch() {
+                        self.state = Clutch::Engaging;
+                        self.roll_offsets();
                     }
                 }
             }
         }
-        self.scale = THROTTLE_SCALE[self.state as usize];
+        // A missed drag shift: no throttle for 0.45 s. A good shift: the throttle scale
+        // rises by up to 2 x the shift quality, fading over 0.5 s.
+        if self.missed_time != 0.0 {
+            self.scale = 0.0;
+            if self.time - self.missed_time >= 0.45 {
+                self.missed_time = 0.0;
+            }
+        } else if self.state == Clutch::Engaged && self.bonus_time > 0.0 {
+            let k = (0.5 - (self.time - self.bonus_time)) / 0.5 * self.bonus * 2.0;
+            if k > 0.0 {
+                self.scale = 1.0 + k;
+            }
+            if self.time - self.bonus_time >= 0.5 {
+                self.bonus_time = 0.0;
+                self.bonus = 0.0;
+            }
+        }
+    }
+
+    /// How well an upshift at `rpm` from gear `g` is timed (0x594f20): 1 perfect (within
+    /// 5 % of the window past the shift point), 0.85 / 0.5 good / early, 0 too early,
+    /// -1 late. The window is per gear and drag skill row (0x7fbf60).
+    pub fn shift_quality(&self, rpm: f32, g: usize) -> f32 {
+        let win = SHIFT_WINDOWS[self.shift_skill.min(3)][g.min(8)];
+        if win <= 0.0 {
+            return 0.0;
+        }
+        let diff = self.up[g] - rpm;
+        if diff >= 0.0 {
+            let q = 1.0 - diff / (0.95 * win);
+            if q <= 0.0 {
+                0.0
+            } else if q < 0.5 {
+                0.5
+            } else {
+                0.85
+            }
+        } else if (1.0 - 0.95) * win >= diff.abs() {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    /// An upshift starts (0x5a1700): in a drag race its quality becomes the bonus.
+    fn on_upshift(&mut self, rpm: f32) {
+        if self.drag && self.target >= self.gear {
+            self.bonus = self.shift_quality(rpm, self.gear);
+        }
     }
 
     /// The shift rpm, once a frame after the substeps (0x5a5540).
