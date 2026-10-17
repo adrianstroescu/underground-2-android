@@ -130,6 +130,19 @@ const MATERIALS: usize = 192;
 
 /// HarmonicCoeff the PC game sent for a car in a City Hall race at night (apitrace).
 /// The game builds these per car from the lights around it.
+/// The CAR effect's HarmonicCoeff on the frontend turntable (apitrace, main menu).
+const FE_CAR_SH: [[f32; 4]; 10] = [
+    [0.2838785, 0.2800791, 0.2806783, 0.3822927],
+    [-0.0540668, -0.0589376, -0.0600356, -0.0784363],
+    [0.0540668, 0.0589376, 0.0600356, 0.0784363],
+    [0.0959906, 0.0824512, 0.1198413, 0.1260351],
+    [0.2009289, 0.1927852, 0.1827200, 0.2628995],
+    [0.0494831, 0.0407052, 0.0357564, 0.0576390],
+    [-0.0918520, -0.1042264, -0.1177251, -0.1398962],
+    [0.1847479, 0.1735675, 0.1667829, 0.2387354],
+    [-0.0692198, -0.0865743, -0.1008683, -0.1141260],
+    [0.4319152, 0.4155875, 0.4520715, 0.5796917],
+];
 const CAR_SH: [[f32; 4]; 10] = [
     [0.2771666, 0.2771666, 0.2771666, 0.3640937],
     [-0.04462969, -0.04462969, -0.04462969, -0.05862677],
@@ -247,6 +260,8 @@ pub struct FrameData<'a> {
     /// worldheadlight effect: the HEADLIGHTS pattern lights the world it falls on.
     pub headlight: Option<(Mat4, [f32; 3])>,
     pub hud: &'a [HudVertex],
+    /// Draw the frontend platform (the menus' 3D backdrop) instead of the city.
+    pub platform: bool,
     /// Frontend (FEng) quads, drawn under the HUD, and their batches.
     pub fe: &'a [FeVertex],
     pub fe_batches: &'a [FeBatch],
@@ -307,6 +322,8 @@ pub struct Renderer {
     /// Which scenery sections are visible from where the camera is (empty: all).
     sections_on: Vec<bool>,
     sky: Vec<GpuMesh>,
+    /// The frontend's 3D backdrop.
+    platform: Option<GpuMesh>,
     car_models: Vec<CarGpu>,
     targets: Option<Targets>,
     post: PostFx,
@@ -750,6 +767,7 @@ impl Renderer {
             groups_on: Vec::new(),
             sections_on: Vec::new(),
             sky: Vec::new(),
+            platform: None,
             car_models: Vec::new(),
             targets: None,
             post: PostFx::new(device, &gpu.queue, format, sample_count, DEPTH),
@@ -837,6 +855,10 @@ impl Renderer {
         Some(GpuMesh { vbuf, ibuf, ranges: m.ranges.clone(), bbox_min: m.bbox_min, bbox_max: m.bbox_max, group: 0, section: 0 })
     }
 
+    pub fn set_platform(&mut self, gpu: &Gpu, mesh: &MeshData) {
+        self.platform = Self::upload_mesh(gpu, mesh);
+    }
+
     pub fn add_section(&mut self, gpu: &Gpu, mesh: &MeshData, sky: bool, group: u16, section: u32) {
         if let Some(mut m) = Self::upload_mesh(gpu, mesh) {
             m.group = group;
@@ -922,15 +944,16 @@ impl Renderer {
         let globals = Globals {
             view_proj: view_proj.to_cols_array_2d(),
             cam_pos: f.cam_pos.extend(1.0).into(),
-            fog_color: FOG_COLOR,
-            fog: FOG,
+            // The frontend: black fog from the camera out to 250 m (FogValue (250, 1/250, 0.6)).
+            fog_color: if f.platform { [0.0, 0.0, 0.0, 1.0] } else { FOG_COLOR },
+            fog: if f.platform { [0.0, 250.0, 0.4, 0.0] } else { FOG },
             light_dir: light.extend(0.0).into(),
             ambient: [0.30, 0.33, 0.42, 1.0],
             screen: [width as f32, height as f32, strength, 0.0],
             clip: [0.0, 0.0, 0.0, 1.0],
             headlight_vp: f.headlight.map_or(Mat4::ZERO, |h| h.0).to_cols_array_2d(),
             headlight_color: f.headlight.map_or([0.0; 4], |h| [h.1[0], h.1[1], h.1[2], 1.0]),
-            sh: CAR_SH,
+            sh: if f.platform { FE_CAR_SH } else { CAR_SH },
         };
         gpu.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         // Mirror the camera in the street plane z = h and clip what is below it.
@@ -1091,6 +1114,7 @@ impl Renderer {
 
         let planes = frustum_planes(&view_proj);
         let visible: Vec<usize> = (0..self.sections.len())
+            .filter(|_| !f.platform)
             .filter(|&i| {
                 let m = &self.sections[i];
                 self.section_on(m)
@@ -1110,7 +1134,7 @@ impl Renderer {
             .filter_map(|(i, c)| Some((WORLD_SLOTS + i as u32 * CAR_SLOTS, c, self.car_models.get(c.model)?)))
             .filter(|(_, c, _)| c.transform.w_axis.truncate().distance(f.cam_pos) < f.draw_distance)
             .collect();
-        if let (Some(rvp), Some(refl)) = (refl_view_proj, &self.reflection) {
+        if let (Some(rvp), Some(refl), false) = (refl_view_proj, &self.reflection, f.platform) {
             let rplanes = frustum_planes(&rvp);
             let range = f.draw_distance.min(180.0);
             let c = FOG_COLOR;
@@ -1174,7 +1198,7 @@ impl Renderer {
             }
         }
         let blur = f.post.speed_blur;
-        let c = FOG_COLOR;
+        let c = if f.platform { [0.0; 4] } else { FOG_COLOR };
         let clear = wgpu::Color { r: c[0] as f64, g: c[1] as f64, b: c[2] as f64, a: 1.0 };
         let glow_count = f.glows.len() as u32;
         {
@@ -1222,7 +1246,7 @@ impl Renderer {
 
             // Sky first, no depth.
             pass.set_pipeline(&self.pipe_sky);
-            for m in &self.sky {
+            for m in self.sky.iter().filter(|_| !f.platform) {
                 draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
                     (r.blend != Blend::Additive).then_some((SLOT_SKY, r.texture))
                 });
@@ -1230,6 +1254,22 @@ impl Renderer {
 
             // Opaque + cutout world.
             pass.set_pipeline(&self.pipe_opaque);
+            if let (true, Some(m)) = (f.platform, &self.platform) {
+                draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| match r.blend {
+                    Blend::Opaque => Some((SLOT_WORLD, r.texture)),
+                    Blend::Cutout => Some((SLOT_WORLD_CUTOUT, r.texture)),
+                    Blend::Blend | Blend::Additive => None,
+                });
+                pass.set_pipeline(&self.pipe_blend);
+                draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Blend).then_some((SLOT_WORLD_BLEND, r.texture))
+                });
+                pass.set_pipeline(&self.pipe_add);
+                draws += draw_ranges(&mut pass, m, &self.textures, &self.white, &self.model_bg, |r| {
+                    (r.blend == Blend::Additive).then_some((SLOT_WORLD_ADD, r.texture))
+                });
+                pass.set_pipeline(&self.pipe_opaque);
+            }
             for &i in &visible {
                 let m = &self.sections[i];
                 let road = if refl_view_proj.is_some() { SLOT_ROAD } else { SLOT_WORLD };

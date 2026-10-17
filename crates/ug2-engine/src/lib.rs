@@ -695,6 +695,9 @@ impl Game {
                         .collect();
                     self.traffic_material = list.iter().position(|m| m.name == "TRAFFIC").map_or(0, |i| i as u16 + 1);
                 }
+                LoadEvent::Platform(mesh) => {
+                    self.renderer.set_platform(&self.gpu, &mesh);
+                }
                 LoadEvent::FeTextures(list) => {
                     for t in &list {
                         self.renderer.upload_fe_texture(&self.gpu, t);
@@ -1372,7 +1375,10 @@ impl Game {
     /// Renders into `target`. Borrows the HUD canvas and the renderer as disjoint fields.
     fn render_to(&mut self, target: &wgpu::TextureView, width: u32, height: u32) {
         let orbit = matches!(self.screen, Screen::Title | Screen::Garage);
-        let (view, eye) = if orbit && self.spawned {
+        let platform = self.fe_active();
+        let (view, eye) = if platform {
+            fe_camera()
+        } else if orbit && self.spawned {
             // Slow orbit around the parked car behind the title menu; in the garage the
             // car sits on the right of the screen, next to the menu.
             let garage = self.screen == Screen::Garage;
@@ -1390,18 +1396,21 @@ impl Game {
         glows.clear();
         let near = |p: Vec3| p.distance(eye) < 160.0;
         if let (true, Some(m)) = (self.spawned, self.player_model()) {
-            let t = self.vehicle.transform();
+            let t = if platform { fe_car_transform(&self.vehicle) } else { self.vehicle.transform() };
             let wheels = wheel_transforms(&self.vehicle, t, &m.wheels);
             let parts = self.cfg.parts_for(car_name(self.player_car.as_deref().unwrap_or("")));
             let glass = TINTS.get((parts.tint as usize).wrapping_sub(1)).map_or([1.0; 3], |t| t.1);
             let paint_material = self.paint_material(self.cfg.paint);
             cars.push(CarDraw { model: m.id, transform: t, wheels, paint: self.cfg.paint, skin: None, brake: self.brake_light, glass, paint_material });
-            push_car_glows(&mut glows, m, t, self.brake_light, right, up);
+            // The frontend turntable shows the car without light glows (menu capture).
+            if !platform {
+                push_car_glows(&mut glows, m, t, self.brake_light, right, up);
+            }
             if let Some(&(_, color)) = NEONS.get((parts.neon as usize).wrapping_sub(1)) {
                 push_neon(&mut glows, m, t, color);
             }
         }
-        for o in &self.session.opponents {
+        for o in self.session.opponents.iter().filter(|_| !platform) {
             let Some(m) = self.models.get(&o.model) else { continue };
             let t = o.vehicle.transform();
             let wheels = wheel_transforms(&o.vehicle, t, &m.wheels);
@@ -1411,7 +1420,7 @@ impl Game {
                 push_car_glows(&mut glows, m, t, o.brake_light, right, up);
             }
         }
-        for c in &self.session.traffic.cars {
+        for c in self.session.traffic.cars.iter().filter(|_| !platform) {
             let Some(m) = self.models.get(&c.model) else { continue };
             let t = c.vehicle.transform();
             let wheels = wheel_transforms(&c.vehicle, t, &m.wheels);
@@ -1423,7 +1432,9 @@ impl Game {
             }
         }
         self.update_visibility(eye);
-        push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
+        if !platform {
+            push_world_glows(&mut glows, &self.lights, eye, view.row(2).truncate() * -1.0, right, up);
+        }
         let mut fe_verts = std::mem::take(&mut self.fe_verts);
         let mut fe_batches = std::mem::take(&mut self.fe_batches);
         fe_verts.clear();
@@ -1442,7 +1453,8 @@ impl Game {
         });
         let data = FrameData {
             view,
-            fov_y: self.camera.fov_y,
+            // The frontend camera: 29.2° vertical (P11 = 3.843 in the capture).
+            fov_y: if platform { 2.0 * (1.0f32 / 3.843).atan() } else { self.camera.fov_y },
             // The garage menu covers the left of the screen: shift the image so the car
             // sits in the free space on the right without looking at it from an angle.
             lens_shift: if orbit && self.screen == Screen::Garage { 0.62 } else { 0.0 },
@@ -1453,7 +1465,8 @@ impl Game {
             draw_distance: self.cfg.draw_distance,
             vertex_light_scale: self.cfg.vertex_light_scale,
             // Mirror plane at the street under the player's car.
-            reflect_height: (self.cfg.reflections > 0.01 && self.spawned)
+            platform,
+            reflect_height: (self.cfg.reflections > 0.01 && self.spawned && !platform)
                 .then(|| self.vehicle.pos.z - self.vehicle.ride_height),
             reflect_strength: self.cfg.reflections,
             headlight: self
@@ -1594,6 +1607,23 @@ impl Game {
 }
 
 /// Street-lamp glows within reach of the camera, fading in the distance.
+/// The frontend camera, from an apitrace frame of the PC game's menu: eye at
+/// (0, −4, 1.4), looking along +y pitched 0.71° down, vertical field of view 29.2°.
+fn fe_camera() -> (Mat4, Vec3) {
+    let eye = Vec3::new(0.0, -4.0, 1.4);
+    let dir = Vec3::new(0.0, 0.999_922, -0.012_462);
+    (Mat4::look_at_rh(eye, eye + dir, Vec3::Z), eye)
+}
+
+/// The player's car on the frontend turntable, as in the captured menu frame: 9.43 m
+/// in front of the camera, at (0, 5.43) on the platform floor, yawed −54.2°.
+fn fe_car_transform(v: &Vehicle) -> Mat4 {
+    let ground = v.pos.z - v.ride_height;
+    let to_origin = Mat4::from_translation(-Vec3::new(v.pos.x, v.pos.y, ground));
+    let turn = Mat4::from_rotation_z((-54.2f32).to_radians() - v.yaw);
+    Mat4::from_translation(Vec3::new(0.0, 5.43, 0.0)) * turn * to_origin * v.transform()
+}
+
 fn push_world_glows(out: &mut Vec<GpuVertex>, lights: &[ug2_formats::light::WorldLight], eye: Vec3, forward: Vec3, right: Vec3, up: Vec3) {
     // As the PC game draws them (apitrace): a HEADLIGHTGLOW sprite 6 m wide, moved 4 m
     // towards the camera, colour RGB (110, 100, 75) at alpha 220, added to the scene.

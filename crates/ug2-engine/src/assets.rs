@@ -141,6 +141,8 @@ pub enum LoadEvent {
     Frontend(Box<FrontendData>),
     /// Frontend textures (menus, icons, fonts), kept for the session.
     FeTextures(Vec<PreparedTexture>),
+    /// The frontend's 3D backdrop (FRONTEND/PLATFORMS/<name>.BIN), drawn behind the menus.
+    Platform(Box<MeshData>),
     /// The region's environment parameter maps (screen tint, fog...).
     EnvMaps(Box<ug2_formats::envmap::EnvMaps>),
     Done,
@@ -194,6 +196,9 @@ pub fn spawn_loader(game: GameDir, cfg: LoaderConfig) -> Loader {
             send_car(&game, &shared, &mut lib, &cfg, &cfg.car, &cfg.parts, &tx);
             if let Err(e) = load_frontend(&game, cfg.bc_textures, &tx) {
                 log::warn!("frontend: {e:#}");
+            }
+            if let Err(e) = load_platform(&game, "Showroom", cfg.bc_textures, &tx) {
+                log::warn!("platform: {e:#}");
             }
             let _ = tx.send(LoadEvent::Effects(Box::new(Effects::load(&game))));
             if let Err(e) = load_world(&game, &cfg.location, cfg.bc_textures, &tx) {
@@ -679,6 +684,41 @@ fn build_collision(
 
 /// Converts a parsed texture into an upload-ready mip chain. With BC support the
 /// DXT data is passed straight through; otherwise it is decoded to RGBA8.
+/// A frontend platform: its solids where they were authored (no instances) and its
+/// textures. The main menu uses Showroom (the alley with the turntable).
+fn load_platform(game: &GameDir, name: &str, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Result<()> {
+    let data = game.read(&format!("FRONTEND/PLATFORMS/{name}.BIN"))?;
+    let mut blend_of: HashMap<u32, Blend> = HashMap::new();
+    let mut prepared = Vec::new();
+    for p in find_tpks(&data) {
+        for t in &p.textures {
+            blend_of.insert(t.hash, blend_for(t));
+            prepared.extend(prepare_texture(t, bc));
+        }
+    }
+    let _ = tx.send(LoadEvent::Textures(prepared));
+    let mut vertices = Vec::new();
+    let mut buckets = HashMap::new();
+    let mut bbox = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    let texture_of = |h: u32, shader: u32| {
+        if shader == bin_hash("ROAD") {
+            (h, Blend::Opaque, Role::Road)
+        } else {
+            (h, blend_of.get(&h).copied().unwrap_or(Blend::Opaque), Role::Normal)
+        }
+    };
+    let mut n = 0;
+    for list in ug2_formats::solid::find_solid_lists(&data) {
+        for s in &list.solids {
+            append_solid(s, &Mat4::IDENTITY, &mut vertices, &mut buckets, &texture_of, &|_| 0, &mut bbox);
+            n += 1;
+        }
+    }
+    log::info!("platform {name}: {n} solids, box {:?}..{:?}", bbox.0, bbox.1);
+    let _ = tx.send(LoadEvent::Platform(Box::new(finish_mesh(vertices, buckets, bbox))));
+    Ok(())
+}
+
 pub struct FrontendData {
     pub packages: Vec<ug2_formats::feng::Package>,
     pub strings: ug2_formats::lang::Strings,
