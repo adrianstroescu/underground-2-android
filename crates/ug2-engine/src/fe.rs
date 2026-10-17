@@ -103,6 +103,7 @@ pub enum FeKind {
     Credits,
     Crib,
     WorldMap,
+    Trax,
 }
 
 /// Credits.fng (speed2.exe 0x4b87b0): every line is a copy of CreditsArea running
@@ -281,6 +282,7 @@ pub struct FeScreen {
     stats: Option<Stats>,
     credits: Option<Credits>,
     world: Option<crate::fe_worldmap::WorldMap>,
+    trax: Option<crate::fe_trax::Trax>,
 }
 
 #[derive(Default)]
@@ -333,6 +335,7 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::Credits => 0x401,
         FeKind::Crib => 0x405,
         FeKind::WorldMap => 0x8401,
+        FeKind::Trax => 0x401,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -562,7 +565,7 @@ impl Frontend {
             }
         }
         let results = Results { rows, drift, time: 0.0 };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None, credits: None, world: None };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None, credits: None, world: None, trax: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -616,7 +619,7 @@ impl Frontend {
         let mut menu = IconMenu::default();
         menu.hidden.extend(scene.index_of(h("_EVENT_HANDLER_")));
         let credits = Credits { slots, time: 0.0 };
-        let mut s = FeScreen { scene, kind: FeKind::Credits, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: Some(credits), world: None };
+        let mut s = FeScreen { scene, kind: FeKind::Credits, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: Some(credits), world: None, trax: None };
         s.apply(&data.strings);
         s.apply_credits(&data.credits);
         self.screen = Some(s);
@@ -660,7 +663,7 @@ impl Frontend {
         menu.arrows = [find(&scene, "ScrollBar_Arrow_1"), find(&scene, "ScrollBar_Arrow_2")];
         let racer = rows.iter().position(|r| r.player).unwrap_or(0);
         let stats = Stats { rows, racer, circuit, mph, from_menu, stat_objs, lap_objs, title, data: data_r, lap_time, lap_pos };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats), credits: None, world: None };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats), credits: None, world: None, trax: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -683,12 +686,46 @@ impl Frontend {
             stats: None,
             credits: None,
             world: Some(world),
+            trax: None,
         };
         if let Some(w) = &mut s.world {
             w.apply(&mut s.scene, &data.strings);
         }
         self.screen = Some(s);
         true
+    }
+
+    /// The EA Trax jukebox with the saved modes.
+    pub fn open_trax(&mut self, get: impl Fn(&str) -> Option<f32>) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("EA_Trax_Jukebox.fng")) else { return false };
+        let mut scene = Scene::new(pkg.clone());
+        scene.advance(1.0);
+        scene.send_named("CALL PACKAGE");
+        scene.send_named("CALL FRAMES");
+        let mut menu = IconMenu::default();
+        menu.hidden.extend(scene.index_of(h("_EVENT_HANDLER_")));
+        let trax = crate::fe_trax::Trax::new(get);
+        trax.apply(&mut scene, &data.strings);
+        self.screen = Some(FeScreen {
+            scene,
+            kind: FeKind::Trax,
+            menu,
+            list: None,
+            list_kind: None,
+            car: None,
+            results: None,
+            stats: None,
+            credits: None,
+            world: None,
+            trax: Some(trax),
+        });
+        true
+    }
+
+    /// The jukebox settings to save.
+    pub fn trax_values(&self) -> Option<Vec<(String, f32)>> {
+        Some(self.screen.as_ref()?.trax.as_ref()?.values())
     }
 
     /// The TRACKMAP the world map shows (to load).
@@ -886,7 +923,7 @@ impl Frontend {
         let (list, hidden) = OptionList::new(&mut scene, rows, visible);
         let mut menu = IconMenu::default();
         menu.hidden = hidden;
-        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None, credits: None, world: None };
+        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None, credits: None, world: None, trax: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -917,7 +954,7 @@ impl Frontend {
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None, credits: None, world: None };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None, credits: None, world: None, trax: None };
         s.apply(&data.strings);
         s.apply_car(data);
         self.screen = Some(s);
@@ -984,6 +1021,9 @@ impl Frontend {
         if let Some(w) = self.screen.as_mut().and_then(|s| s.world.as_mut()) {
             return w.step_row(delta);
         }
+        if let Some(t) = self.screen.as_mut().and_then(|s| s.trax.as_mut()) {
+            return t.step_row(delta);
+        }
         let Some(l) = self.screen.as_mut().and_then(|s| s.list.as_mut()) else { return false };
         l.step_row(delta);
         true
@@ -1049,7 +1089,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: None, world: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: None, world: None, trax: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -1080,6 +1120,9 @@ impl Frontend {
         if let Some(w) = &mut s.world {
             w.tick(dt);
             w.apply(&mut s.scene, &data.strings);
+        }
+        if let Some(t) = &s.trax {
+            t.apply(&mut s.scene, &data.strings);
         }
         s.apply_credits(&data.credits);
         let kind = s.kind;
@@ -1125,6 +1168,10 @@ impl Frontend {
         let Some(s) = &mut self.screen else { return false };
         if let Some(w) = &mut s.world {
             return w.step_stage(delta);
+        }
+        if let Some(t) = &mut s.trax {
+            t.change(delta);
+            return true;
         }
         if let Some(st) = &mut s.stats {
             let next = (st.racer as i32 + delta).clamp(0, st.rows.len() as i32 - 1) as usize;
@@ -1237,6 +1284,10 @@ impl Frontend {
                 }
                 Tap::Nothing => None,
             };
+        }
+        if let Some(t) = self.screen.as_mut()?.trax.as_mut() {
+            t.tap(vx - 320.0, vy - 240.0);
+            return None;
         }
         if self.screen.as_ref()?.world.is_some() {
             let w = self.screen.as_mut()?.world.as_mut()?;

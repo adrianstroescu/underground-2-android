@@ -14,6 +14,7 @@ pub mod fe;
 pub mod fe_hud;
 pub mod fe_list;
 pub mod fe_worldmap;
+pub mod fe_trax;
 pub mod career_orig;
 mod frontend;
 pub mod hud;
@@ -1189,6 +1190,16 @@ impl Game {
                 self.fe.open_pause_options_main();
                 true
             }
+            Some(fe::FeKind::Trax) => {
+                if let Some(v) = self.fe.trax_values() {
+                    for (k, x) in v {
+                        self.cfg.options.insert(k, x);
+                    }
+                    self.cfg.save(&self.config_path);
+                }
+                self.fe.open_options_main();
+                true
+            }
             Some(fe::FeKind::Credits) => {
                 self.fe.open_options_main();
                 true
@@ -1510,6 +1521,11 @@ impl Game {
             fe::FeAction::OptionsCategory(c) => {
                 if c == 8 {
                     self.fe.open_credits();
+                    return;
+                }
+                if c == 5 {
+                    let opts = self.cfg.options.clone();
+                    self.fe.open_trax(|k| opts.get(k).copied());
                     return;
                 }
                 let opts = self.cfg.options.clone();
