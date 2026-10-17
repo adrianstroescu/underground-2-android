@@ -54,7 +54,12 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
     port's own screens);
   - Quick Race: Mode Select → Track Select → Game Options → Car Select → race. The
     options rows per mode, defaults and limits are the game's. Car Select has the
-    manufacturer logo, name badge, filters and race mode.
+    manufacturer logo, name badge, filters, race mode and the stat bars (game formulas),
+    then the Transmission dialog;
+  - Options (Audio, Gameplay, Player) with the game's rows and defaults, saved in
+    ug2.cfg as `opt.*`; volumes, speedometer units, camera and transmission act;
+  - Career menu (Resume / New / Load), the pause menu and pause options, the PC help
+    bar and generic dialogs.
 
 ## Not tested on the phone yet
 
@@ -73,9 +78,9 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
      string offset; (label hash, offset) pairs).
    - The owner's PC install has mod files (Dec 2024: FrontB.lzc, GlobalB.lzc,
      English.bin, *MemoryFile.bin). The originals are the `.bak` files; prefer them.
-   - Remaining original screens: car select stat bars (formulas being decoded),
-     the Options screens (with "Ask for Transmission" and its dialog), Customize, the
-     career screens (Crib, World Map, SMS), Profile Manager, the pause menu and HUD.
+   - Remaining original screens: post-race screens, HUD, Customize, the career screens
+     (Crib, World Map, SMS), Profile Manager, EA Trax, Credits, Display options.
+     Several new screens (options, pause, dialogs) still need a run on the phone.
      Quick race traffic density per level (None turns traffic off; the other
      levels are not decoded) and Lap KO races are not done.
    - Story scenes and tutorial / region movies at the right career moments. The FEng

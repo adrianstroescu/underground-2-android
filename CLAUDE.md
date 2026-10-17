@@ -304,6 +304,20 @@ shares the scene depth. Per frame, in this order:
     handling `0x5b5490`, range table GLOBALB chunk 0x34a32). Bars are value × (backing
     − 92) × 0.95 (`0x540e90`).
 - In-game screens (UI_Pause, HUD_*, dialogs) are FEng packages in `GLOBAL/InGame*.bun`.
+  Resident ones (UI_PC_Help_Bar, GenericDialog_*) are in GLOBALB.
+- Icon menus are built with `0x51f670(icon texture hash, label hash)`. Grep the calls
+  to list every menu: main `0x4aee40`, career `0x4af110`, crib `0x4af865`, quick race
+  modes `0x4b2d80`, options `0x4b6230`, post race `0x4bee6f`, pause `0x4c2902` (free
+  run) / `0x4c2bd2` (race), pause options `0x4c30b1`, profiles `0x4c58f4`.
+- The 4th word of a factory entry holds the help bar flags. `0x52d330` gives the
+  labels: 1 Quit Game, 4 Continue, 0x400 Back, 0x1000 Customize... Buttons fill the
+  slots in bit order (button1 bottom right, button2 top right, button3...).
+- Options (`UI_OptionsMain` `0x4b6230`, rows `0x4b8470`): Audio `0x4b6e60`, Gameplay
+  `0x4b7310`, Player `0x4b7cd0` (profile `0x83aa64 + player·0x28`), defaults in
+  `0x5116e0`. Sliders checked against a PC capture: track = base − 92, fill =
+  value × track × 0.95, knob 7 past it. UI_Options shows 8 rows, the quick race list 7.
+- Dialogs: `0x558790(package, button labels..., message)`, GenericDialog_SMALL: text
+  `message_blurb`, buttons button1 / button2 (two) or button3 (one).
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
