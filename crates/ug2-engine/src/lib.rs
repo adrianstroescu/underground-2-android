@@ -167,6 +167,8 @@ pub struct Game {
     groups_for: Option<u16>,
     /// Big centred race message (shift timing, blown engine): text, colour, time left.
     banner: Option<(String, [f32; 4], f32)>,
+    /// The last manual shift's timing and a serial (the HUD's ShiftMessage).
+    last_shift: Option<(Shift, u32)>,
     /// Steering input last frame (drag lane changes fire on a new press).
     lane_input: f32,
     /// Driver for the player's car when the `autopilot` test option is on.
@@ -307,6 +309,7 @@ impl Game {
             group_sets: Vec::new(),
             groups_for: None,
             banner: None,
+            last_shift: None,
             lane_input: 0.0,
             autopilot: None,
             autopilot_stuck: 0.0,
@@ -820,12 +823,22 @@ impl Game {
     /// Races whose HUD is HUD_SingleRace (circuit, sprint, URL) use the original HUD;
     /// drag, drift and Street X have their own packages, not done yet.
     fn original_hud(&self) -> bool {
-        self.screen == Screen::Playing
-            && match self.session.race() {
-                Some(r) => matches!(r.def.info.mode, roads::Mode::Circuit | roads::Mode::Sprint | roads::Mode::Url),
-                // Free roam in Bayview: HUD_SingleRace with the explore map.
-                None => self.region == "L4RA",
-            }
+        self.hud_kind().is_some()
+    }
+
+    /// The HUD package for what is being driven; None keeps the port's HUD (drift is
+    /// not done yet, nor free roam outside Bayview).
+    fn hud_kind(&self) -> Option<fe_hud::HudKind> {
+        if self.screen != Screen::Playing {
+            return None;
+        }
+        match self.session.race().map(|r| r.def.info.mode) {
+            Some(roads::Mode::Circuit | roads::Mode::Sprint | roads::Mode::Url) => Some(fe_hud::HudKind::Single),
+            Some(roads::Mode::StreetX) => Some(fe_hud::HudKind::ShortTrack),
+            Some(roads::Mode::Drag) => Some(fe_hud::HudKind::Drag),
+            Some(roads::Mode::Drift) => None,
+            None => (self.region == "L4RA").then_some(fe_hud::HudKind::Single),
+        }
     }
 
     fn update_race_hud(&mut self, dt: f32) {
@@ -835,8 +848,12 @@ impl Game {
             self.fe.race_hud = None;
             return;
         }
+        let kind = self.hud_kind().unwrap_or(fe_hud::HudKind::Single);
+        if self.fe.race_hud.as_ref().is_some_and(|h| h.kind != kind) {
+            self.fe.race_hud = None;
+        }
         if self.fe.race_hud.is_none() {
-            if !self.fe.open_race_hud() {
+            if !self.fe.open_race_hud(kind) {
                 return;
             }
             // The race's map (TRACKMAP4000 in free roam).
@@ -883,8 +900,20 @@ impl Game {
             others: self.session.opponents.iter().map(|o| (o.vehicle.pos.x, o.vehicle.pos.y, o.vehicle.yaw)).collect(),
         });
         let racing = rh.countdown.is_none();
+        let shift_message = self.last_shift.map(|(q, serial)| {
+            let label = match q {
+                Shift::Perfect => 0x0598_b065,
+                Shift::Good => 0x27d2_dd45,
+                Shift::Early => 0x2303_d76c,
+                Shift::Late => 0x27d7_5cd8,
+            };
+            (label, serial)
+        });
         Some(fe_hud::HudInput {
             race: true,
+            race_time: r.time,
+            heat: self.vehicle.heat,
+            shift_message,
             speed_ms: self.vehicle.speed().abs(),
             rpm,
             redline,
@@ -923,6 +952,9 @@ impl Game {
         });
         Some(fe_hud::HudInput {
             race: false,
+            race_time: 0.0,
+            heat: 0.0,
+            shift_message: None,
             speed_ms: self.vehicle.speed().abs(),
             rpm,
             redline,
@@ -1456,6 +1488,8 @@ impl Game {
                             Shift::Early | Shift::Late => [1.0, 0.55, 0.2, 1.0],
                         };
                         self.banner = Some((q.label().to_string(), col, 1.2));
+                        let serial = self.last_shift.map_or(1, |(_, s)| s + 1);
+                        self.last_shift = Some((q, serial));
                     }
                 }
                 Action::ShiftDown => {

@@ -24,9 +24,74 @@ fn h(name: &str) -> u32 {
 }
 
 /// What the HUD shows this frame.
+/// Which HUD package (speed2.exe 0x5f189a picks it by race type).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudKind {
+    /// HUD_SingleRace: circuit, sprint, URL, free roam.
+    Single,
+    /// HUD_Short_Track: Street X.
+    ShortTrack,
+    /// HUD_Drag.
+    Drag,
+}
+
+impl HudKind {
+    pub fn package(self) -> &'static str {
+        match self {
+            HudKind::Single => "HUD_SingleRace.fng",
+            HudKind::ShortTrack => "HUD_Short_Track.fng",
+            HudKind::Drag => "HUD_Drag.fng",
+        }
+    }
+
+    /// Top-level objects a one-player race shows; the rest belongs to other widgets
+    /// (online, dyno, free roam indicators) the game keeps hidden.
+    fn shown(self) -> &'static [&'static str] {
+        match self {
+            HudKind::Single => &SHOWN,
+            HudKind::ShortTrack => &[
+                "GaugeCluster",
+                "POSITION",
+                "PositionBacking",
+                "BestTimeCounter",
+                "LeaderBoardGroup",
+                "LapCounterBacking_1",
+                "NumberLaps",
+                "LapNumber",
+                "LapText",
+                "Track2000_map",
+                "Minimap_Mask",
+                "TrackMapTargetRing",
+                "321_Go",
+                "Lap_Time_Text",
+                "Lap_Time_Title",
+                "WrongWayImage",
+            ],
+            HudKind::Drag => &[
+                "GaugeCluster",
+                "Group",
+                "Group(1)",
+                "NOS",
+                "Group(12)",
+                "HEAT_Bar",
+                "321_Go",
+                "ShiftMessage",
+                "RaceTime",
+                "Shift_light",
+                "PositionBacking",
+                "Drag_Position_Backing_03",
+            ],
+        }
+    }
+}
+
 pub struct HudInput {
     /// A race (position, laps, leaderboard); false in free roam.
     pub race: bool,
+    /// Race clock (s), drag heat 0..1, and the last shift message (label, serial).
+    pub race_time: f32,
+    pub heat: f32,
+    pub shift_message: Option<(u32, u32)>,
     pub speed_ms: f32,
     /// Engine speed (rpm).
     pub rpm: f32,
@@ -67,6 +132,10 @@ pub struct MapInput {
 
 pub struct RaceHud {
     pub scene: Scene,
+    pub kind: HudKind,
+    shown: Vec<u32>,
+    shift_serial: u32,
+    shift_time: f32,
     /// The map object, drawn as a disc.
     pub map_object: Option<usize>,
     /// Extra virtual units on each side of the 640-wide frame (wide screens); the HUD's
@@ -103,28 +172,28 @@ const SHOWN: [&str; 21] = [
 ];
 
 impl RaceHud {
-    pub fn new(mut scene: Scene) -> Self {
+    pub fn new(mut scene: Scene, kind: HudKind) -> Self {
         scene.advance(1.0);
         scene.send_named("CALL PACKAGE");
         scene.send_named("CALL FRAMES");
-        let shown: Vec<u32> = SHOWN.iter().map(|n| h(n)).collect();
+        let shown: Vec<u32> = kind.shown().iter().map(|n| h(n)).collect();
         for i in 0..scene.package.objects.len() {
             let o = &scene.package.objects[i];
             if o.parent.is_some() {
                 continue;
             }
             // The tachometer's backing group sits right under the gauge cluster.
-            let backing = o.hash == h("Group") && o.data[7] > 100.0 && o.data[8] > 150.0;
+            let backing = kind == HudKind::Single && o.hash == h("Group") && o.data[7] > 100.0 && o.data[8] > 150.0;
             let on = shown.contains(&o.hash) || backing;
             scene.states[i].hidden = Some(!on);
         }
-        for n in ["Lap_Time_Text", "Lap_Time_Title", "WrongWayImage", "321_Go", "Shift_light"] {
+        for n in ["Lap_Time_Text", "Lap_Time_Title", "WrongWayImage", "321_Go", "Shift_light", "ShiftMessage"] {
             if let Some(i) = scene.index_of(h(n)) {
                 scene.states[i].hidden = Some(true);
             }
         }
         let map_object = scene.index_of(h("Track2000_map"));
-        RaceHud { scene, map_object, wide: 0.0, time: 0.0, dial: None }
+        RaceHud { scene, kind, shown, shift_serial: 0, shift_time: 0.0, map_object, wide: 0.0, time: 0.0, dial: None }
     }
 
     /// Touch layout: the gauge cluster rises above the pedals and the minimap moves to
@@ -134,6 +203,9 @@ impl RaceHud {
         let gauge = [h("GaugeCluster"), h("Group")];
         let map = [h("Track2000_map"), h("Minimap_Mask"), h("TrackMapTargetRing"), h("Minimap_North_indicator"), h("PlayerCarIndicator_1")];
         let dx = if x > 0.0 { self.wide } else { -self.wide };
+        if self.kind == HudKind::Drag {
+            return [dx, 0.0];
+        }
         if gauge.contains(&name_hash) {
             return [dx - 30.0, -95.0];
         }
@@ -144,7 +216,7 @@ impl RaceHud {
     fn place_groups(&mut self) {
         for i in 0..self.scene.package.objects.len() {
             let o = &self.scene.package.objects[i];
-            if o.parent.is_some() || self.scene.states[i].hidden == Some(true) && !SHOWN.iter().any(|n| h(n) == o.hash) {
+            if o.parent.is_some() || self.scene.states[i].hidden == Some(true) && !self.shown.contains(&o.hash) {
                 continue;
             }
             let [dx, dy] = self.offset(o.hash, o.data[7]);
@@ -152,7 +224,7 @@ impl RaceHud {
             self.scene.states[i].position = Some([x, y]);
             // The gauge cluster is drawn at 0.8 so it fits between the leaderboard and
             // the pedals.
-            if [h("GaugeCluster"), h("Group")].contains(&o.hash) {
+            if self.kind != HudKind::Drag && [h("GaugeCluster"), h("Group")].contains(&o.hash) {
                 self.scene.states[i].size = Some([0.8, 0.8]);
             }
         }
@@ -174,7 +246,11 @@ impl RaceHud {
         self.time += dt;
         self.scene.advance(dt * 1000.0);
         self.place_groups();
-        self.tachometer(t, strings, textures);
+        if self.kind == HudKind::Drag {
+            self.drag(t, strings, textures, dt);
+        } else {
+            self.tachometer(t, strings, textures);
+        }
         // Race position: "%d", the suffix, "/%d".
         let suffix = match t.place % 10 {
             _ if t.place == 10 => "th",
@@ -202,8 +278,10 @@ impl RaceHud {
         }
         let lap = t.lap_time.map_or_else(|| strings.by_hash(0x61c9_b7a2).unwrap_or("--:--.--").to_string(), |x| race_time(x, false));
         self.set_text("CurrentLapTime", lap);
-        for n in ["POSITION", "PositionBacking", "BestTimeCounter", "LapLeftGroup", "LeaderBoardGroup"] {
-            self.show(n, t.race);
+        if self.kind != HudKind::Drag {
+            for n in ["POSITION", "PositionBacking", "BestTimeCounter", "LapLeftGroup", "LeaderBoardGroup"] {
+                self.show(n, t.race);
+            }
         }
         self.leaderboard(t);
         self.countdown(t);
@@ -283,6 +361,102 @@ impl RaceHud {
                 self.show("NOS_Gamebreaker", false);
                 self.show("nos_line", false);
             }
+        }
+    }
+
+    /// The drag tachometer (0x4c7090): needle −43° + 86° × rpm / max (every car type
+    /// has −43 / +43 at +0x7fc / +0x800), DRAG_RPM_<dial>_LINES and the redline mark,
+    /// the shift light and message, the heat bar (UV crop 0x4c66f0) and the race clock.
+    fn drag(&mut self, t: &HudInput, strings: &Strings, textures: &std::collections::HashSet<u32>, dt: f32) {
+        let (red, max) = (t.redline, t.max_rpm.max(t.redline));
+        let class = if max >= 9000.0 && red >= 8500.0 {
+            if red >= 9000.0 { 0 } else { 1 }
+        } else if max >= 8000.0 && red >= 7500.0 {
+            if red >= 8000.0 { 2 } else { 3 }
+        } else if max >= 7000.0 && red >= 6500.0 {
+            if red >= 7000.0 { 4 } else { 5 }
+        } else if red >= 6000.0 {
+            6
+        } else {
+            7
+        };
+        let dial = [10000.0, 10000.0, 9000.0, 9000.0, 8000.0, 8000.0, 7000.0, 7000.0][class];
+        if self.dial != Some((dial, red)) {
+            self.dial = Some((dial, red));
+            let redline = ["9000", "8500", "8000", "7500", "7000", "6500", "6000", "5500"][class];
+            for (n, tex) in [("3rdPersonTachRPMNumbers", format!("DRAG_RPM_{}_LINES", dial as u32)), ("RPM_Redline", format!("DRAG_RPM_REDLINES_{redline}"))] {
+                let x = bin_hash(&tex);
+                if let (Some(i), true) = (self.scene.index_of(h(n)), textures.contains(&x)) {
+                    self.scene.states[i].texture = Some(x);
+                }
+            }
+        }
+        let f = (t.rpm / max.max(1.0)).clamp(0.0, 1.0);
+        if let Some(i) = self.scene.index_of(h("3rdPersonNeedle")) {
+            self.scene.states[i].rotation = Some((-43.0 + 86.0 * f).rem_euclid(360.0));
+        }
+        let (v, unit) = if t.mph { (t.speed_ms * 2.237, 0x8569_ab44) } else { (t.speed_ms * 3.6, 0x8569_a25f) };
+        self.set_text("3rdPersonSpeed", format!("{:3}", v as i32));
+        self.set_text("3rdPersonSpeedUnits", strings.by_hash(unit).unwrap_or("").to_string());
+        let gear = match t.gear {
+            g if g < 0 => 'R',
+            0 => 'N',
+            g if g <= 7 => (b'0' + g as u8) as char,
+            _ => 'X',
+        };
+        self.set_text("3rdPersonGear", gear.to_string());
+        self.show("Group(12)", t.turbo);
+        // Shift light: close to the shift point it pulses blue, green when right.
+        let near = t.gear > 0 && t.rpm > red - 600.0;
+        if let Some(i) = self.scene.index_of(h("Shift_light")) {
+            self.scene.states[i].hidden = Some(!near);
+            if near {
+                let want = if t.rpm > red + 30.0 {
+                    h("PulseRed")
+                } else if t.rpm > red - 300.0 {
+                    h("PulseGreen")
+                } else {
+                    h("PulseBlue")
+                };
+                let st = &self.scene.states[i];
+                if st.script != want || !st.running {
+                    self.scene.set_script(i, want);
+                }
+            }
+        }
+        // "Perfect Shift!" and friends: ZoomIn, hidden 0.6 s later.
+        if let Some((label, serial)) = t.shift_message {
+            if serial != self.shift_serial {
+                self.shift_serial = serial;
+                self.shift_time = 0.0;
+                if let Some(i) = self.scene.index_of(h("ShiftMessage")) {
+                    self.scene.states[i].text = strings.by_hash(label).map(str::to_string);
+                    self.scene.states[i].hidden = Some(false);
+                    self.scene.set_script(i, h("ZoomIn"));
+                }
+            }
+        }
+        self.shift_time += dt;
+        if self.shift_time > 0.6 {
+            self.show("ShiftMessage", false);
+        }
+        // Heat bar: the top of the bar's texture moves with the heat, its bottom stays.
+        if let Some(i) = self.scene.index_of(h("HEAT_Bar")) {
+            let d = self.scene.package.objects[i].data;
+            let hgt = d[15].max(1.0);
+            let v = t.heat.clamp(0.0, 1.0);
+            let top_v = ((hgt - 105.0) / hgt) + (5.0 / hgt - (hgt - 105.0) / hgt) * v;
+            let new_h = (1.0 - top_v) * hgt;
+            let st = &mut self.scene.states[i];
+            st.uv = Some([d[17], top_v, d[19], d[20]]);
+            st.size = Some([d[14], new_h]);
+            let [px, py] = st.position.unwrap_or([d[7], d[8]]);
+            st.position = Some([px, py + (hgt - new_h) * 0.5]);
+        }
+        self.set_text("RaceTime", race_time(t.race_time, false));
+        match t.nitro {
+            Some((v, _)) if v > 0.0 => self.show("nos_line", true),
+            _ => self.show("nos_line", false),
         }
     }
 

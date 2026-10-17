@@ -1168,11 +1168,11 @@ impl Frontend {
         }
     }
 
-    /// Starts the race HUD (HUD_SingleRace).
-    pub fn open_race_hud(&mut self) -> bool {
+    /// Starts the race HUD.
+    pub fn open_race_hud(&mut self, kind: crate::fe_hud::HudKind) -> bool {
         let Some(data) = &self.data else { return false };
-        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("HUD_SingleRace.fng")) else { return false };
-        self.race_hud = Some(crate::fe_hud::RaceHud::new(Scene::new(pkg.clone())));
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case(kind.package())) else { return false };
+        self.race_hud = Some(crate::fe_hud::RaceHud::new(Scene::new(pkg.clone()), kind));
         true
     }
 

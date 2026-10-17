@@ -823,7 +823,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
         }
         for p in find_tpks(&ig) {
             for t in &p.textures {
-                if need.contains(&t.hash) || t.name.starts_with("INGAME_ICON") || t.name.starts_with("3RDPERSON") {
+                if need.contains(&t.hash) || t.name.starts_with("INGAME_ICON") || t.name.starts_with("3RDPERSON") || t.name.starts_with("DRAG_") {
                     take(t, &mut out);
                 }
             }
