@@ -40,6 +40,8 @@ pub struct Progress {
     pub lap_places: Vec<usize>,
     pub laps_led: u32,
     pub top_speed: f32,
+    /// Out of a Lap KO race.
+    pub knocked_out: bool,
     last_pos: Option<Vec3>,
 }
 
@@ -60,6 +62,9 @@ pub struct Race {
     /// One entry per car: index 0 is the player, then the opponents.
     pub cars: Vec<Progress>,
     pub drift: Option<DriftEvent>,
+    /// Lap KO (quick race option): at the end of each lap but the last, the last car
+    /// still running is knocked out (race type 3).
+    pub knockout: bool,
 }
 
 impl Race {
@@ -86,11 +91,12 @@ impl Race {
                     lap_places: Vec::new(),
                     laps_led: 0,
                     top_speed: 0.0,
+                    knocked_out: false,
                     last_pos: None,
                 }
             })
             .collect();
-        Self { def, laps, phase: RacePhase::Countdown(3.5), time: 0.0, cars, drift: None }
+        Self { def, laps, phase: RacePhase::Countdown(3.5), time: 0.0, cars, drift: None, knockout: false }
     }
 
     pub fn racing(&self) -> bool {
@@ -169,6 +175,18 @@ impl Race {
                 p.lap_places.push(place);
                 if place == 1 {
                     p.laps_led += 1;
+                }
+            }
+        }
+        if self.knockout && line.circuit {
+            for k in 1..self.laps as i32 {
+                let active: Vec<usize> = (0..self.cars.len()).filter(|&i| !self.cars[i].retired).collect();
+                let done = active.iter().filter(|&&i| self.cars[i].lap >= k).count();
+                if active.len() > 1 && done == active.len() - 1 {
+                    if let Some(&last) = active.iter().find(|&&i| self.cars[i].lap < k) {
+                        self.cars[last].retired = true;
+                        self.cars[last].knocked_out = true;
+                    }
                 }
             }
         }

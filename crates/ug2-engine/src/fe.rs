@@ -97,6 +97,8 @@ pub struct ResultRow {
     /// Finish time (s); None when the car did not finish.
     pub time: Option<f32>,
     pub retired: bool,
+    /// Knocked out of a Lap KO race.
+    pub knocked: bool,
     /// Drift score.
     pub score: Option<u32>,
     pub player: bool,
@@ -1347,6 +1349,7 @@ impl FeScreen {
             set(format!("Car_Data_{n}"), car);
             let time = match (row.score, row.time) {
                 (Some(s), _) if r.drift => s.to_string(),
+                _ if row.knocked => label(0x5d82_dba2),
                 _ if row.retired => label(0x01e6_6364),
                 (_, None) => label(0x61c9_b7a2),
                 (_, Some(t)) if behind => match leader {
@@ -1374,7 +1377,9 @@ impl FeScreen {
             (label(0xf9d7_f4c2), r.time.map_or_else(|| label(0x61c9_b7a2), |t| race_time(t, false))),
             (
                 label(0xab44_ed8b),
-                if r.retired {
+                if r.knocked {
+                    label(0x5d82_dba2)
+                } else if r.retired {
                     label(0x01e6_6364)
                 } else if st.racer == 0 {
                     label(0x61c9_b7a2)

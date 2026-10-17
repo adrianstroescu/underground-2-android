@@ -73,6 +73,8 @@ pub struct PendingRace {
     pub opponents: Vec<(String, [f32; 3])>,
     /// Career race: (race key, prize, progress 0..1 for opponent strength).
     pub career: Option<(String, u32, f32)>,
+    /// Quick race Lap KO.
+    pub knockout: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -683,6 +685,7 @@ impl Game {
             opponents,
             career: Some((race_key(&def), def.reward, progress)),
             race: def,
+            knockout: false,
         };
         self.quick.last = Some(p.clone());
         self.pending_race = Some(p);
@@ -710,7 +713,8 @@ impl Game {
             let paint = PAINTS[rand() as usize % PAINTS.len()].1;
             opponents.push((car, paint));
         }
-        let p = PendingRace { race, laps: self.quick.laps, opponents, career: None };
+        let knockout = race.mode == Mode::Circuit && self.quick.settings[QuickRace::slot(Some(race.mode))].lap_ko;
+        let p = PendingRace { race, laps: self.quick.laps, opponents, career: None, knockout };
         self.quick.last = Some(p.clone());
         self.pending_race = Some(p);
     }
@@ -769,6 +773,9 @@ impl Game {
         log::info!("race {} ({} {:?}): {} laps, {} opponents", def.info.track, def.info.name, def.info.mode, p.laps, opps.len());
         let length = def.line.length;
         self.session.start_race(def, p.laps, &mut self.vehicle, &opps);
+        if let Some(r) = self.session.race_mut() {
+            r.knockout = p.knockout;
+        }
         // With this race's barriers switched on, steer its line clear of the walls.
         self.update_groups();
         if let (Some(w), Some(r)) = (&mut self.world, self.session.race_mut()) {
