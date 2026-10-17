@@ -2090,6 +2090,7 @@ dependencies = [
 name = "ug2-formats"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "log",
 ]
 

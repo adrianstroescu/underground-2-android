@@ -206,7 +206,7 @@ impl Powertrain {
     /// `wheels_ok`: all wheels on the ground with slip under 4 m/s.
     pub fn frame_input(&mut self, throttle: f32, request: Option<usize>, wheels_ok: bool) {
         let mut th = if throttle <= 0.15 { 0.0 } else { throttle };
-        if th > 0.0 && th < 0.5 && self.gear >= FIRST && self.shift_rpm < 3000.0 {
+        if th > 0.0 && th < 0.5 && self.gear >= FIRST && self.rpm() < 3000.0 {
             th = 0.5;
         }
         self.throttle = if self.blown { 0.0 } else { th };
