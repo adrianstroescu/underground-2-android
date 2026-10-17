@@ -804,7 +804,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
         for p in find_tpks(&gb) {
             for t in &p.textures {
-                if wanted.contains(&t.hash) || t.name.contains("ICON") || t.name.starts_with("U2_") {
+                if wanted.contains(&t.hash) || t.name.contains("ICON") || t.name.starts_with("U2_") || t.name.starts_with("CARSELECT_") || t.name.starts_with("SECONDARY_LOGO") {
                     take(t, &mut out);
                 }
             }

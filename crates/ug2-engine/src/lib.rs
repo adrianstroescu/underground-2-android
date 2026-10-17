@@ -433,6 +433,14 @@ impl Game {
                         self.fe.step(-1);
                         None
                     }
+                    "ArrowUp" => {
+                        self.fe.step_row(-1);
+                        None
+                    }
+                    "ArrowDown" => {
+                        self.fe.step_row(1);
+                        None
+                    }
                     "ArrowRight" => {
                         self.fe.step(1);
                         None
@@ -831,8 +839,42 @@ impl Game {
                 self.fe.open_quick_race_modes();
                 true
             }
+            Some(fe::FeKind::QuickRaceOptions) => {
+                match self.quick.chosen.as_ref().map(|r| r.mode) {
+                    Some(m) => self.open_qr_tracks(m),
+                    None => {
+                        self.fe.open_quick_race_modes();
+                    }
+                }
+                true
+            }
             _ => false,
         }
+    }
+
+    /// The original track select for a mode: each track once, named by the mode's
+    /// direction setting.
+    fn open_qr_tracks(&mut self, m: roads::Mode) {
+        self.quick.mode = m;
+        let reverse = self.quick.settings[frontend::QuickRace::slot(Some(m))].reverse;
+        let mut races: Vec<(usize, roads::RaceInfo)> = Vec::new();
+        for (i, r) in self.catalog.iter().enumerate().filter(|(_, r)| r.mode == m) {
+            if let Some(at) = races.iter().position(|(_, o)| o.track == r.track) {
+                // Prefer the forward entry.
+                if races[at].1.reverse && !r.reverse {
+                    races[at] = (i, r.clone());
+                }
+                continue;
+            }
+            races.push((i, r.clone()));
+        }
+        for (_, r) in &mut races {
+            if r.reversible {
+                r.reverse = reverse;
+            }
+        }
+        let refs: Vec<(usize, &roads::RaceInfo)> = races.iter().map(|(i, r)| (*i, r)).collect();
+        self.fe.open_track_select(&refs);
     }
 
     fn fe_action(&mut self, a: fe::FeAction) {
@@ -845,23 +887,54 @@ impl Game {
             fe::FeAction::Customize => frontend::Row::Garage,
             fe::FeAction::Options => frontend::Row::Options,
             fe::FeAction::Mode(m) => {
-                self.quick.mode = m;
-                let races: Vec<(usize, roads::RaceInfo)> =
-                    self.catalog.iter().enumerate().filter(|(_, r)| r.mode == m).map(|(i, r)| (i, r.clone())).collect();
-                let refs: Vec<(usize, &roads::RaceInfo)> = races.iter().map(|(i, r)| (*i, r)).collect();
-                self.fe.open_track_select(&refs);
+                // Picking a mode resets the opponents to 3 (5 in URL), speed2.exe 0x4b2c00.
+                self.quick.settings[frontend::QuickRace::slot(Some(m))].opponents = if m == roads::Mode::Url { 5 } else { 3 };
+                self.open_qr_tracks(m);
                 return;
             }
             fe::FeAction::Track(i) => {
-                // The options and car screens are still the port's own.
                 let Some(race) = self.catalog.get(i).cloned() else { return };
                 self.quick.mode = race.mode;
                 self.quick.race = self.catalog.iter().filter(|r| r.mode == race.mode).position(|r| r.track == race.track && r.reverse == race.reverse).unwrap_or(0);
-                self.quick.laps = race.laps.max(1);
+                let settings = self.quick.settings[frontend::QuickRace::slot(Some(race.mode))];
+                self.quick.chosen = Some(race.clone());
+                self.fe.open_mode_options(Some(race.mode), Some(race), settings);
+                return;
+            }
+            fe::FeAction::FreeRun => {
+                self.quick.chosen = None;
+                let settings = self.quick.settings[frontend::QuickRace::slot(None)];
+                if !self.fe.open_mode_options(None, None, settings) {
+                    self.fe_go(frontend::Row::FreeRoam);
+                }
+                return;
+            }
+            fe::FeAction::OptionsDone => {
+                let Some(s) = self.fe.mode_settings() else { return };
+                let mode = self.quick.chosen.as_ref().map(|r| r.mode);
+                self.quick.settings[frontend::QuickRace::slot(mode)] = s;
+                // Traffic: None turns it off (the density levels are not decoded yet).
+                self.session.traffic_on = s.traffic > 0;
+                let Some(mut race) = self.quick.chosen.clone() else {
+                    self.fe_go(frontend::Row::FreeRoam);
+                    return;
+                };
+                if race.reversible {
+                    race.reverse = s.reverse;
+                }
+                self.quick.laps = if race.mode.laps() { s.laps } else { 1 };
+                self.quick.opponents = s.opponents as usize;
+                log::info!("quick race {} {:?} reverse {} laps {} opponents {} {:?}", race.track, race.mode, race.reverse, self.quick.laps, s.opponents, s);
+                self.quick.chosen = Some(race);
+                // The car select screen is still the port's own.
                 frontend::Row::QuickRace
             }
-            fe::FeAction::FreeRun => frontend::Row::FreeRoam,
         };
+        self.fe_go(row);
+    }
+
+    /// Opens one of the port's own screens from the title list.
+    fn fe_go(&mut self, row: frontend::Row) {
         // Those rows live on the title screen's list.
         if self.fe.kind() != Some(fe::FeKind::MainMenu) {
             self.fe.open_main_menu();

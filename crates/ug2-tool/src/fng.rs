@@ -64,6 +64,29 @@ pub fn render(game_dir: &str, name: &str, out: &Path, ms: Option<f32>) -> Result
         scene.advance(16.0);
         t += 16.0;
     }
+    // FNG_POS=name,name...: print the objects' state after the scripts ran.
+    if let Ok(names) = std::env::var("FNG_POS") {
+        for n in names.split(',') {
+            let hash = ug2_formats::bin_hash(&n.trim().to_ascii_uppercase());
+            for i in (0..scene.package.objects.len()).filter(|&i| scene.package.objects[i].hash == hash) {
+                let v = scene.values(i);
+                println!("{n}: pos ({:.1}, {:.1}, {:.1}) size ({:.2}, {:.2}) pivot ({:.1}, {:.1}) hidden {:?}", v[7], v[8], v[9], v[14], v[15], v[4], v[5], scene.states[i].hidden);
+            }
+        }
+    }
+    // FNG_TRACKS=name: print the object's script tracks.
+    if let Ok(n) = std::env::var("FNG_TRACKS") {
+        let hash = ug2_formats::bin_hash(&n.trim().to_ascii_uppercase());
+        for o in scene.package.objects.iter().filter(|o| o.hash == hash) {
+            println!("data {:?}", &o.data[..20]);
+            for sc in &o.scripts {
+                println!("script {:08x} len {}", sc.id, sc.length);
+                for t in &sc.tracks {
+                    println!("  off {} base {:?} keys {:?}", t.offset, t.base, t.keys);
+                }
+            }
+        }
+    }
     let quads = scene.layout(&strings, &all_fonts);
     let (w, h) = (640usize, 480usize);
     let mut fb = vec![0f32; w * h * 3];

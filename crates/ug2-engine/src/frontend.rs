@@ -36,11 +36,32 @@ pub struct QuickRace {
     pub opponents: usize,
     /// The last race started, for "race again".
     pub last: Option<PendingRace>,
+    /// Mode options per mode (`Mode as usize`; the last one is Free Run).
+    pub settings: [crate::fe::ModeSettings; 7],
+    /// The race set up on the original screens (track and direction).
+    pub chosen: Option<RaceInfo>,
+}
+
+impl QuickRace {
+    /// Slot of `settings` for a mode (None: Free Run).
+    pub fn slot(mode: Option<Mode>) -> usize {
+        mode.map_or(6, |m| m as usize)
+    }
 }
 
 impl Default for QuickRace {
     fn default() -> Self {
-        Self { mode: Mode::Circuit, race: 0, career_step: 0, shop_car: 0, laps: 2, opponents: 3, last: None }
+        Self {
+            mode: Mode::Circuit,
+            race: 0,
+            career_step: 0,
+            shop_car: 0,
+            laps: 2,
+            opponents: 3,
+            last: None,
+            settings: [Default::default(); 7],
+            chosen: None,
+        }
     }
 }
 
@@ -511,6 +532,7 @@ impl Game {
                 if let Some(&m) = modes.get(cycle(at, modes.len())) {
                     self.quick.mode = m;
                     self.quick.race = 0;
+                    self.quick.chosen = None;
                     self.quick.laps = self.selected_race().map_or(2, |r| r.laps.max(1));
                 }
             }
@@ -548,12 +570,13 @@ impl Game {
             Row::Track => {
                 let n = self.catalog.iter().filter(|r| r.mode == self.quick.mode).count();
                 self.quick.race = cycle(self.quick.race, n);
+                self.quick.chosen = None;
                 if let Some(r) = self.selected_race() {
                     self.quick.laps = r.laps.max(1);
                 }
             }
             Row::Laps => self.quick.laps = (self.quick.laps as i32 + step).clamp(1, 5) as u32,
-            Row::Opponents => self.quick.opponents = (self.quick.opponents as i32 + step).clamp(1, 5) as usize,
+            Row::Opponents => self.quick.opponents = (self.quick.opponents as i32 + step).clamp(0, 5) as usize,
             Row::StartRace => self.prepare_race(),
             Row::Back => {
                 if self.screen == Screen::Career {
@@ -667,7 +690,7 @@ impl Game {
 
     /// Picks opponents and starts loading their cars; the race begins once they are in.
     fn prepare_race(&mut self) {
-        let Some(race) = self.selected_race().cloned() else { return };
+        let Some(race) = self.quick.chosen.clone().or_else(|| self.selected_race().cloned()) else { return };
         let player = self.current_car();
         let mut pool: Vec<String> = self.racers.iter().filter(|r| **r != player).cloned().collect();
         let mut seed = (self.title_time * 1000.0) as u32 | 1;

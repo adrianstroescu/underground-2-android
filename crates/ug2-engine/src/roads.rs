@@ -255,6 +255,9 @@ pub struct RaceInfo {
     pub length: u32,
     /// District icon index (see `TrackInfo::location`).
     pub location: u32,
+    /// See `TrackInfo::drift_kind` / `reversible`.
+    pub drift_kind: u8,
+    pub reversible: bool,
 }
 
 /// Every race of the career list whose region `available` says is installed, one per
@@ -303,6 +306,8 @@ pub fn race_catalog(global_b: &[u8], available: impl Fn(&str) -> bool) -> Vec<Ra
             reward: c.reward,
             length: info.length,
             location: info.location,
+            drift_kind: info.drift_kind,
+            reversible: info.reversible,
         });
     }
     out.sort_by_key(|r| (r.mode as u8, r.track, r.reverse));
