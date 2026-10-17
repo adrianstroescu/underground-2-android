@@ -252,7 +252,7 @@ pub enum RaceType {
     Other(u8),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CareerRace {
     pub hash: u32,
     pub race_type: RaceType,
@@ -264,15 +264,37 @@ pub struct CareerRace {
     pub reward: u32,
     /// 1 for regular career races; URL tournament races use 3 and 4.
     pub group: u8,
+    /// Name, e.g. "STAGE_1_DRAG_1" (string pool 0x34A1D).
+    pub name: String,
+    /// Story movies played before the race and after winning it (MOVIES/<name>.vp6).
+    pub movie_before: Option<String>,
+    pub movie_after: Option<String>,
+    /// Career stage 0..5 (+0x37).
+    pub stage: u8,
 }
 
 /// Parses the career race list (first gameplay container in GLOBALB).
 pub fn parse_career_races(global_b: &[u8]) -> Result<Vec<CareerRace>> {
     let Some(gameplay) = ChunkIter::new(global_b).find(|c| c.id == GAMEPLAY) else { bail!("no gameplay data") };
     let Some(chunk) = gameplay.child(CAREER_RACES) else { bail!("no career races") };
+    // Names are u16 offsets into the string pool (0x34A1D).
+    let pool = gameplay.child(0x0003_4A1D).map(|c| c.data).unwrap_or(&[]);
+    let text = |off: u16| -> Option<String> {
+        let rest = pool.get(off as usize..)?;
+        let end = rest.iter().position(|&b| b == 0)?;
+        (end > 0).then(|| String::from_utf8_lossy(&rest[..end]).into_owned())
+    };
     let mut out = Vec::new();
     for rec in chunk.data.chunks_exact(CAREER_RACE_LEN) {
+        let off = |o: usize| u16::from_le_bytes([rec[o], rec[o + 1]]);
+        let name = text(off(0)).unwrap_or_default();
+        let movie_before = if off(2) != 0 { text(off(2)) } else { None };
+        let movie_after = if off(4) != 0 { text(off(4)) } else { None };
         out.push(CareerRace {
+            name,
+            movie_before,
+            movie_after,
+            stage: u8_at(rec, 0x37)?,
             hash: u32_at(rec, 8)?,
             group: u8_at(rec, 12)?,
             reverse: u8_at(rec, 13)? != 0,
@@ -527,5 +549,20 @@ mod tests {
     #[test]
     fn sprint_line() {
         check_race(4101, "Routes4101F.bin", 4419.0);
+    }
+}
+
+#[cfg(test)]
+mod career_tests {
+    #[test]
+    fn career_movies() {
+        let game = crate::fs::GameDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.."));
+        let Ok(gb) = game.read("GLOBAL/GLOBALB.BUN") else { return };
+        let races = super::parse_career_races(&gb).unwrap();
+        let drag = races.iter().find(|r| r.name == "STAGE_1_DRAG_1").expect("STAGE_1_DRAG_1");
+        assert_eq!(drag.movie_before.as_deref().map(str::to_ascii_uppercase).as_deref(), Some("DRAGTUT"));
+        for r in races.iter().filter(|r| r.movie_before.is_some() || r.movie_after.is_some()) {
+            println!("{} stage {} before {:?} after {:?}", r.name, r.stage, r.movie_before, r.movie_after);
+        }
     }
 }

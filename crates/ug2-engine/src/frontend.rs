@@ -673,6 +673,14 @@ impl Game {
             return;
         }
         let def = self.catalog[race].clone();
+        // The story movie before the race (speed2.exe 0x53d630); SCENE20 is followed by
+        // the drift tutorial.
+        if let Some(m) = &def.movie_before {
+            self.play_movie(m);
+            if m.eq_ignore_ascii_case("SCENE20") {
+                self.play_movie("DriftTut");
+            }
+        }
         let (class, progress) = Career::opponent_strength(step, ladder.len());
         let player = self.current_car();
         let mut pool: Vec<String> = self.racers.iter().filter(|r| **r != player && tier(r) == class).cloned().collect();
@@ -750,6 +758,10 @@ impl Game {
 
     pub(crate) fn try_start_pending_race(&mut self) {
         let Some(p) = &self.pending_race else { return };
+        // A story movie plays first.
+        if self.movie_playing() {
+            return;
+        }
         // The race's region comes first (the call waits for a load in progress).
         if self.region != p.race.region {
             let region = p.race.region.clone();

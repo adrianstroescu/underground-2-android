@@ -260,6 +260,9 @@ pub struct RaceInfo {
     pub reversible: bool,
     /// TRACKMAP calibration: world (x, y) of the image's top-left, its width, HUD zoom.
     pub map: [f32; 4],
+    /// Career story movies before the race and after winning it (career race data).
+    pub movie_before: Option<String>,
+    pub movie_after: Option<String>,
 }
 
 /// Every race of the career list whose region `available` says is installed, one per
@@ -311,7 +314,21 @@ pub fn race_catalog(global_b: &[u8], available: impl Fn(&str) -> bool) -> Vec<Ra
             drift_kind: info.drift_kind,
             reversible: info.reversible,
             map: [info.map_upper_left[0], info.map_upper_left[1], info.map_width, info.map_zoom],
+            movie_before: None,
+            movie_after: None,
         });
+    }
+    // Story movies sit on particular career entries (S2_URL_1 has SCENE17 / SCENE08...):
+    // hang them on the track and direction they race.
+    for c in &career {
+        if let Some(r) = out.iter_mut().find(|r| r.track == c.track && r.reverse == c.reverse) {
+            if r.movie_before.is_none() {
+                r.movie_before = c.movie_before.clone();
+            }
+            if r.movie_after.is_none() {
+                r.movie_after = c.movie_after.clone();
+            }
+        }
     }
     out.sort_by_key(|r| (r.mode as u8, r.track, r.reverse));
     out

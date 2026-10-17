@@ -809,6 +809,10 @@ impl Game {
         self.sound.with(|mx| mx.set_movie(None));
     }
 
+    pub(crate) fn movie_playing(&self) -> bool {
+        self.movie.is_some() || !self.movie_queue.is_empty()
+    }
+
     /// Queues a movie (`MOVIES/<name>.vp6`) to play now.
     pub fn play_movie(&mut self, name: &str) {
         if let Some(p) = GameDir::new(&self.data_dir).resolve(&format!("MOVIES/{name}.vp6")) {
@@ -1296,6 +1300,8 @@ impl Game {
                     log::info!("new career: a career is in progress");
                     return;
                 }
+                // A new career opens with scene01 (speed2.exe 0x53d710).
+                self.play_movie("Scene01");
                 frontend::Row::Career
             }
             fe::FeAction::LoadGame => {
@@ -1667,8 +1673,15 @@ impl Game {
             c.won.insert(key);
         }
         c.save();
+        let cash = c.cash;
         self.prize_paid = Some(prize);
-        log::info!("career: finished {place}, prize ${prize}, cash ${}", c.cash);
+        log::info!("career: finished {place}, prize ${prize}, cash ${cash}");
+        // The story movie after winning (speed2.exe 0x513a50).
+        if place == 1 {
+            if let Some(m) = self.session.race().and_then(|r| r.def.info.movie_after.clone()) {
+                self.play_movie(&m);
+            }
+        }
     }
 
     fn reset_player(&mut self) {
