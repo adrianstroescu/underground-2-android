@@ -352,6 +352,10 @@ shares the scene depth. Per frame, in this order:
     record +0x118, stage overview maps TRACKMAP4500..4504).
 - EA Trax: 27 songs in an exe table at `0x7ecd80` (title / artist / album / FE|IG);
   playlist and modes (Off / Menu / Racing / All) in the profile at `0x83acb8`.
+  Song id N is SCHl stream `music::SONG_STREAMS[N]` of `pfdata/MusicSFx.mus` (MusicSFx.mpf
+  event N), played whole. Menus play the Menu|All set, races the Racing|All set; no song
+  repeats until all enabled ones played; Sequential = next list position, Random = the
+  r-th remaining (`0x479220`, `0x46b6f0`). The other streams are the background score.
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are

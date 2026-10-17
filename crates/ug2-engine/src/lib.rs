@@ -1196,6 +1196,7 @@ impl Game {
                         self.cfg.options.insert(k, x);
                     }
                     self.cfg.save(&self.config_path);
+                    self.apply_options();
                 }
                 self.fe.open_options_main();
                 true
@@ -1349,6 +1350,17 @@ impl Game {
             mono: get("audio_mode", 1.0) == 0.0,
         };
         self.sound.with(|m| m.levels = levels);
+        // EA Trax: the menu set on the frontend, the racing set in game.
+        if let Some(m) = &self._music {
+            let mut p = music::Playlist { in_race: self.screen != Screen::Title, ..Default::default() };
+            for (i, mode) in p.modes.iter_mut().enumerate() {
+                if let Some(v) = o.get(&format!("trax{i}")) {
+                    *mode = *v as u8 % 4;
+                }
+            }
+            p.random = get("trax_random", 0.0) != 0.0;
+            m.set_playlist(p);
+        }
         self.hud.mph = get("speedo_units", 0.0) == 0.0;
         // The Camera option is the view a drive starts with (the camera button cycles).
         let camera = camera::CameraMode::from_option(get("camera", 3.0) as u8);
