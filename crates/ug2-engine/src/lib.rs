@@ -872,7 +872,7 @@ impl Game {
         let Some(data) = &self.fe.data else { return };
         let current = self.current_car();
         let owned: Vec<String> = self.career.as_ref().map(|c| c.owned.clone()).unwrap_or_default();
-        let cars: Vec<(String, String)> = data
+        let stock: Vec<(String, String)> = data
             .cars
             .iter()
             .filter(|(n, _)| !matches!(n.as_str(), "CORSA" | "PEUGOT106"))
@@ -880,6 +880,10 @@ impl Game {
             .filter(|(n, _)| fe::STARTER_CARS.contains(&n.as_str()) || owned.contains(n) || *n == current)
             .cloned()
             .collect();
+        let career: Vec<(String, String)> =
+            owned.iter().filter_map(|o| data.cars.iter().find(|(n, _)| n == o)).cloned().collect();
+        // All Cars (stock + My Cars; no customised cars yet), Stock Cars, My Cars, Career.
+        let filters = vec![(0x6b68_362c, stock.clone()), (0xe798_a2f7, stock), (0xe7ab_43d3, Vec::new()), (0xb404_5365, career)];
         let mode_label = match self.quick.chosen.as_ref().map(|r| r.mode) {
             Some(roads::Mode::Circuit) => 0x93fd_ee74,
             Some(roads::Mode::Sprint) => 0xdcb9_f861,
@@ -889,7 +893,7 @@ impl Game {
             Some(roads::Mode::Url) => 0xc786_c4e7,
             None => 0x6f24_21b7,
         };
-        self.fe.open_car_select(cars, &current, mode_label);
+        self.fe.open_car_select(filters, &current, mode_label);
     }
 
     /// The original track select for a mode: each track once, named by the mode's

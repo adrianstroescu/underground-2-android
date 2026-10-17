@@ -49,6 +49,11 @@ pub const STARTER_CARS: [&str; 8] = ["PEUGOT", "FOCUS", "COROLLA", "CIVIC", "ESC
 /// The quick race car select (UI_QRCarSelect, speed2.exe 0x4f9d90): one car at a time
 /// with its manufacturer logo and name badge, the filter, and stat bars.
 struct CarSelect {
+    /// (label, cars) per filter that has cars, in the trigger's order (speed2.exe
+    /// 0x4eed10: All Cars, Stock Cars, My Cars, Career, Sponsor Cars; empty ones are
+    /// skipped).
+    filters: Vec<(u32, Vec<(String, String)>)>,
+    filter: usize,
     cars: Vec<(String, String)>,
     selected: usize,
     /// Seconds since the selection last changed (the car loads after 0.3 s).
@@ -362,7 +367,9 @@ impl Frontend {
 
     /// Quick race car select. `cars` are (car type, manufacturer) in the list's order;
     /// `current` is selected first.
-    pub fn open_car_select(&mut self, cars: Vec<(String, String)>, current: &str, mode_label: u32) -> bool {
+    pub fn open_car_select(&mut self, filters: Vec<(u32, Vec<(String, String)>)>, current: &str, mode_label: u32) -> bool {
+        let filters: Vec<_> = filters.into_iter().filter(|(_, c)| !c.is_empty()).collect();
+        let Some(cars) = filters.first().map(|f| f.1.clone()) else { return false };
         let Some(data) = &self.data else { return false };
         let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_QRCarSelect.fng")) else { return false };
         let mut scene = Scene::new(pkg.clone());
@@ -382,11 +389,26 @@ impl Frontend {
             scene.states[i].text = data.strings.by_hash(0x5ac1_fb59).map(str::to_string);
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
-        let car = CarSelect { cars, selected, settled: 0.0, mode_label };
+        let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
         let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, car: Some(car) };
         s.apply(&data.strings);
         s.apply_car(&data.strings, &data.textures);
         self.screen = Some(s);
+        true
+    }
+
+    /// Next / previous car filter; the car stays selected when the new list has it.
+    pub fn step_filter(&mut self, delta: i32) -> bool {
+        let Some(c) = self.screen.as_mut().and_then(|s| s.car.as_mut()) else { return false };
+        let n = c.filters.len() as i32;
+        if n < 2 {
+            return false;
+        }
+        c.filter = (c.filter as i32 + delta).rem_euclid(n) as usize;
+        let current = c.cars.get(c.selected).map(|x| x.0.clone()).unwrap_or_default();
+        c.cars = c.filters[c.filter].1.clone();
+        c.selected = c.cars.iter().position(|x| x.0 == current).unwrap_or(0);
+        c.settled = 0.0;
         true
     }
 
@@ -569,6 +591,17 @@ impl Frontend {
             return self.tap_list(vx, vy);
         }
         if self.screen.as_ref()?.car.is_some() {
+            // The filter arrows (PC_FilterType's) change the filter.
+            for (obj, d) in [(0xcf6f_0439u32, -1), (0xaba9_3d3f, 1)] {
+                let s = self.screen.as_ref()?;
+                if let Some(i) = s.scene.index_of(obj) {
+                    let v = s.scene.values(i);
+                    if (vx - v[7] - 320.0).abs() < 30.0 && (vy - v[8] - 240.0).abs() < 30.0 {
+                        self.step_filter(d);
+                        return None;
+                    }
+                }
+            }
             // The scroll arrows step; the car (badge, logo or the turntable) accepts.
             let s = self.screen.as_ref()?;
             let near = |i: usize, r: f32| {
@@ -834,9 +867,8 @@ impl FeScreen {
         };
         set_tex(&mut self.scene, "ManufacturerLogo", logo);
         set_tex(&mut self.scene, "CarBadge", badge);
-        // "All Cars" (filter 3: stock and own cars).
         if let Some(i) = self.scene.index_of(0x3e81_de59) {
-            self.scene.states[i].text = strings.by_hash(0x6b68_362c).map(str::to_string);
+            self.scene.states[i].text = strings.by_hash(c.filters[c.filter].0).map(str::to_string);
         }
         if let Some(i) = self.scene.index_of(h("RaceMode_DATA")) {
             self.scene.states[i].text = strings.by_hash(c.mode_label).map(str::to_string);

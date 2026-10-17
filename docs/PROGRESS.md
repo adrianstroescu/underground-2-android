@@ -48,6 +48,13 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
 - **Movies**: the VP6 FMVs with sound. The EA logo, the THX logo and the opening play at
   start; a tap skips. Story scenes are not hooked to the career yet.
 - Android 10 phones start (Galaxy S9+ tested); 120 Hz is requested only where the API exists.
+- **Original frontend screens** (FEng packages driven like speed2.exe does, `fe.rs`),
+  over the Showroom turntable:
+  - Main menu (Career, Quick Race, Customize, Options; the last three still open the
+    port's own screens);
+  - Quick Race: Mode Select → Track Select → Game Options → Car Select → race. The
+    options rows per mode, defaults and limits are the game's. Car Select has the
+    manufacturer logo, name badge, filters and race mode.
 
 ## Not tested on the phone yet
 
@@ -66,6 +73,11 @@ Where the port stands, so work can pick up from here. Last updated 2026-10-16
      string offset; (label hash, offset) pairs).
    - The owner's PC install has mod files (Dec 2024: FrontB.lzc, GlobalB.lzc,
      English.bin, *MemoryFile.bin). The originals are the `.bak` files; prefer them.
+   - Remaining original screens: car select stat bars (formulas being decoded),
+     the Options screens (with "Ask for Transmission" and its dialog), Customize, the
+     career screens (Crib, World Map, SMS), Profile Manager, the pause menu and HUD.
+     Quick race traffic density per level (None turns traffic off; the other
+     levels are not decoded) and Lap KO races are not done.
    - Story scenes and tutorial / region movies at the right career moments. The FEng
      screens IG_PlayMovie and UI_Trailers drive them.
    - Fog per zone: the Normal Fog map is decoded (start, max and colour fields), but
