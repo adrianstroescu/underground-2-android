@@ -334,6 +334,15 @@ shares the scene depth. Per frame, in this order:
   repeats. Cars come from the 26-car pool `0x7f6da4` (SUV pool `0x7f6ddc`), capped by
   the player's performance rating (`0x4feaf0`). Skill comes from GLOBALB 0x34b00.
 - Traffic level: a float per level at `[0x883dac] + 0x108 + level·4` (source not traced).
+- Credits: `CREDITS/NA_ENGLISH.TXT` (UTF-16). Each line is a copy of CreditsArea running
+  ROLLCREDIT; its event at 300 ms starts the next line.
+- Career data (GLOBALB gameplay container 0x80034A10; names are u16 offsets into the
+  string pool 0x34A1D):
+  - races 0x34A11 (136 B): +0 name, +2 / +4 movies before / after a win, +0x37 stage;
+  - shops 0x34A12, SMS 0x34A17, stage configs 0x34A18, sponsors 0x34A19, unlock
+    conditions 0x34A1C.
+  - Resume Career lands on the crib menu once DDAY_EVENT_B is done; a new career
+    plays Scene01 and then the "drive to the car lot / crib" events (Scene05 / Scene06).
 - **Strings**: `LANGUAGES/English.bin`, chunk 0x39000 (count, table offset, strings
   offset; entries are (bin_hash(label), offset)).
 - **Fonts**: FNTF, chunk 0x30201 in the language files and GLOBALA. Glyph images are
