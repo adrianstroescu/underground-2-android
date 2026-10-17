@@ -75,7 +75,18 @@ pub struct PendingRace {
     pub career: Option<(String, u32, f32)>,
     /// Quick race Lap KO.
     pub knockout: bool,
+    /// The opponents' driver names.
+    pub names: Vec<String>,
 }
+
+/// Quick race AI driver names (speed2.exe table 0x7f6cd0: plain ASCII, not language
+/// labels); each race draws distinct ones at random (0x4fe970).
+pub const AI_NAMES: [&str; 53] = [
+    "Phil", "Scott", "Kristian", "Carl", "Steve", "Stefan", "Jason", "Greg", "Marc", "Audrey", "Ben", "Mike", "Vlad", "Russ", "Neil", "Mario", "Al",
+    "Carla", "Frank", "Carol", "Serena", "Bill", "Antonio", "Michelle", "Vince", "Amy", "Matt", "Bryce", "Clarence", "Ryan", "Eric", "Daryl", "Stan",
+    "Brent", "Dana", "Hector", "Stacey", "Alex", "Simon", "Timmy", "Terry", "Jackie", "Alden", "Jared", "Paul", "Arnel", "Jamey", "Brian", "Gary",
+    "Lola", "Kirby", "Don", "Marcel",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Row {
@@ -685,6 +696,7 @@ impl Game {
             opponents,
             career: Some((race_key(&def), def.reward, progress)),
             race: def,
+            names: Vec::new(),
             knockout: false,
         };
         self.quick.last = Some(p.clone());
@@ -695,7 +707,17 @@ impl Game {
     pub(crate) fn prepare_race(&mut self) {
         let Some(race) = self.quick.chosen.clone().or_else(|| self.selected_race().cloned()) else { return };
         let player = self.current_car();
-        let mut pool: Vec<String> = self.racers.iter().filter(|r| **r != player).cloned().collect();
+        // The game's quick race pools (speed2.exe 0x4feaf0): 26 cars, or the three SUVs
+        // when the player drives one; picks may repeat and may be the player's model.
+        // (The game also caps each pick at the player car's performance rating; not
+        // done yet.)
+        const POOL: [&str; 26] = [
+            "SKYLINE", "ECLIPSE", "SUPRA", "350Z", "CELICA", "TIBURON", "GOLF", "RX8", "COROLLA", "IS300", "IMPREZAWRX", "LANCEREVO8", "MUSTANGGT",
+            "MIATA", "RX7", "240SX", "FOCUS", "PEUGOT", "3000GT", "G35", "TT", "A3", "SENTRA", "GTO", "CIVIC", "RSX",
+        ];
+        const SUVS: [&str; 3] = ["HUMMER", "NAVIGATOR", "ESCALADE"];
+        let source: &[&str] = if SUVS.contains(&player.as_str()) { &SUVS } else { &POOL };
+        let pool: Vec<String> = source.iter().filter(|c| self.racers.iter().any(|r| r == *c)).map(|c| c.to_string()).collect();
         let mut seed = (self.title_time * 1000.0) as u32 | 1;
         let mut rand = || {
             seed ^= seed << 13;
@@ -709,12 +731,19 @@ impl Game {
             if pool.is_empty() {
                 break;
             }
-            let car = pool.remove(rand() as usize % pool.len());
+            let car = pool[rand() as usize % pool.len()].clone();
             let paint = PAINTS[rand() as usize % PAINTS.len()].1;
             opponents.push((car, paint));
         }
         let knockout = race.mode == Mode::Circuit && self.quick.settings[QuickRace::slot(Some(race.mode))].lap_ko;
-        let p = PendingRace { race, laps: self.quick.laps, opponents, career: None, knockout };
+        let mut names: Vec<String> = Vec::new();
+        while names.len() < opponents.len() {
+            let n = AI_NAMES[rand() as usize % AI_NAMES.len()];
+            if !names.iter().any(|x| x == n) {
+                names.push(n.to_string());
+            }
+        }
+        let p = PendingRace { race, laps: self.quick.laps, opponents, career: None, knockout, names };
         self.quick.last = Some(p.clone());
         self.pending_race = Some(p);
     }
@@ -776,6 +805,7 @@ impl Game {
         if let Some(r) = self.session.race_mut() {
             r.knockout = p.knockout;
         }
+        self.race_names = p.names.clone();
         // With this race's barriers switched on, steer its line clear of the walls.
         self.update_groups();
         if let (Some(w), Some(r)) = (&mut self.world, self.session.race_mut()) {

@@ -169,6 +169,8 @@ pub struct Game {
     banner: Option<(String, [f32; 4], f32)>,
     /// The last manual shift's timing and a serial (the HUD's ShiftMessage).
     last_shift: Option<(Shift, u32)>,
+    /// Driver names of the race's opponents (quick race).
+    race_names: Vec<String>,
     /// Steering input last frame (drag lane changes fire on a new press).
     lane_input: f32,
     /// Driver for the player's car when the `autopilot` test option is on.
@@ -310,6 +312,7 @@ impl Game {
             groups_for: None,
             banner: None,
             last_shift: None,
+            race_names: Vec::new(),
             lane_input: 0.0,
             autopilot: None,
             autopilot_stuck: 0.0,
@@ -886,7 +889,13 @@ impl Game {
             .map(|(k, s)| {
                 // Short car names (CAR_NAME_<type>) stand in for the AI drivers' names.
                 let short = self.fe.data.as_ref().and_then(|d| d.strings.by_hash(bin_hash(&format!("CAR_NAME_{}", car_name(&s.name)))));
-                let name = if s.player { player_name.clone() } else { short.map_or_else(|| display_name(&s.name).to_string(), str::to_string) };
+                let name = if s.player {
+                    player_name.clone()
+                } else if self.race_names.contains(&s.name) {
+                    s.name.clone()
+                } else {
+                    short.map_or_else(|| display_name(&s.name).to_string(), str::to_string)
+                };
                 (k + 1, name, s.gap, s.player, s.value.clone())
             })
             .collect();
@@ -1025,7 +1034,11 @@ impl Game {
                 let p = &r.cars[car];
                 let model = if car == 0 { self.current_car() } else { self.session.opponents[car - 1].model.clone() };
                 fe::ResultRow {
-                    name: if car == 0 { player_name.clone() } else { cars::display_name(&model).to_string() },
+                    name: if car == 0 {
+                        player_name.clone()
+                    } else {
+                        self.race_names.get(car - 1).cloned().unwrap_or_else(|| cars::display_name(&model).to_string())
+                    },
                     car: cars::car_name(&model).to_string(),
                     time: r.cars[car].finish_time,
                     retired: r.cars[car].retired,
@@ -1879,7 +1892,7 @@ impl Game {
                 let name = if car == 0 {
                     "YOU".to_string()
                 } else {
-                    self.session.opponents[car - 1].model.clone()
+                    self.race_names.get(car - 1).cloned().unwrap_or_else(|| self.session.opponents[car - 1].model.clone())
                 };
                 StandingRow {
                     name,
