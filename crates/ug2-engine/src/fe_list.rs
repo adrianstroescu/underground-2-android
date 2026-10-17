@@ -174,7 +174,10 @@ impl OptionList {
         for o in &objs {
             hidden.extend([o.slider[3], o.slider[4]].into_iter().flatten());
         }
-        hidden.extend(["_EVENT_HANDLER_", "DEMO_CAR_SELECT"].into_iter().filter_map(|n| find(scene, n)));
+        // Debug objects, the split-screen player title and the Display screen's colour
+        // calibration (not shown on the other categories, as in a PC capture).
+        let extra = ["_EVENT_HANDLER_", "DEMO_CAR_SELECT", "PLAYER", "Colour_Calibration_Backing", "ColorCal_Blurb", "ColorCal_Logo"];
+        hidden.extend(extra.into_iter().filter_map(|n| find(scene, n)));
         objs.truncate(rows.len());
         for o in &objs {
             for i in [o.name, o.data, o.left, o.right, o.backing].into_iter().flatten() {

@@ -414,6 +414,11 @@ impl Frontend {
             }
         }
         let mut d = Dialog { scene, buttons: list, selected: 0 };
+        for k in 0..d.buttons.len() {
+            d.selected = k;
+            d.highlight(false);
+        }
+        d.selected = 0;
         d.highlight(true);
         self.dialog = Some(d);
         true
@@ -718,11 +723,12 @@ impl Frontend {
         scene.send_named("CALL FRAMES");
         let find = |n: &str| scene.index_of(h(n));
         let master_i = find("OPTION_MASTER").or_else(|| find("ICON_MASTER"));
+        // As built (the object's own data): scripts such as UI_Pause's "Hidden" move it.
         let master = master_i.map_or([0.0, -134.0], |i| {
-            let d = scene.values(i);
+            let d = &scene.package.objects[i].data;
             [d[7], d[8]]
         });
-        let width = master_i.map_or(118.0, |i| scene.values(i)[14]);
+        let width = master_i.map_or(118.0, |i| scene.package.objects[i].data[14]);
         let mut slots: Vec<usize> = (1..=options.len()).filter_map(|k| find(&format!("option_{k}"))).collect();
         let mut hidden: Vec<usize> = master_i.into_iter().collect();
         // Templates and debug objects the game code hides.
@@ -1171,11 +1177,12 @@ impl HelpBar {
 }
 
 impl Dialog {
-    /// The highlighted button plays Highlight; its text turns the highlight green.
+    /// The highlighted button and its text play Highlight, the others UNHIGHLIGHT (the
+    /// Button_Highlight / Button_UnHighlight responses).
     fn highlight(&mut self, on: bool) {
         let Some(&(g, t, _)) = self.buttons.get(self.selected) else { return };
-        self.scene.set_script(g, h(if on { "Highlight" } else { "UNHIGHLIGHT" }));
-        self.scene.states[t].tint = None;
-        let _ = t;
+        let script = h(if on { "Highlight" } else { "UNHIGHLIGHT" });
+        self.scene.set_script(g, script);
+        self.scene.set_script(t, script);
     }
 }

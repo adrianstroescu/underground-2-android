@@ -1732,7 +1732,8 @@ impl Game {
     /// Renders into `target`. Borrows the HUD canvas and the renderer as disjoint fields.
     fn render_to(&mut self, target: &wgpu::TextureView, width: u32, height: u32) {
         let orbit = matches!(self.screen, Screen::Title | Screen::Garage);
-        let platform = self.fe_active();
+        // The showroom only on the frontend; the pause menu sits over the race.
+        let platform = self.fe_active() && self.screen == Screen::Title;
         let (view, eye) = if platform {
             fe_camera()
         } else if orbit && self.spawned {
