@@ -219,6 +219,10 @@ pub struct TrackInfo {
     pub map_width: f32,
     /// HUD minimap zoom: the map shows 0.3 / zoom of the image (speed2.exe 0x4ca840).
     pub map_zoom: f32,
+    /// World map / track select view of TRACKMAP: (x, y, size) in 512-pixel image space
+    /// (+0x118), and +0x124: zoom without animation.
+    pub map_view: [f32; 3],
+    pub map_view_instant: bool,
 }
 
 /// Parses the track table from GLOBALB.
@@ -237,6 +241,8 @@ pub fn parse_track_infos(global_b: &[u8]) -> Result<Vec<TrackInfo>> {
             map_upper_left: [f32_at(rec, 0xAC)?, f32_at(rec, 0xB0)?],
             map_width: f32_at(rec, 0xB4)?,
             map_zoom: f32_at(rec, 0xC0)?,
+            map_view: [f32_at(rec, 0x118)?, f32_at(rec, 0x11C)?, f32_at(rec, 0x120)?],
+            map_view_instant: rec[0x124] != 0,
         });
     }
     Ok(out)

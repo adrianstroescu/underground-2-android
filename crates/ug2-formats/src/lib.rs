@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod bytes;
 pub mod car;
+pub mod career;
 pub mod carinfo;
 pub mod carstats;
 pub mod chunk;

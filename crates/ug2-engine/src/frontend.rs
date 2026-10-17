@@ -713,6 +713,7 @@ impl Game {
 
     /// Picks opponents and starts loading their cars; the race begins once they are in.
     pub(crate) fn prepare_race(&mut self) {
+        self.career_race = None;
         let Some(race) = self.quick.chosen.clone().or_else(|| self.selected_race().cloned()) else { return };
         let player = self.current_car();
         // The game's quick race pools (speed2.exe 0x4feaf0): 26 cars, or the three SUVs

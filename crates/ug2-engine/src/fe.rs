@@ -42,6 +42,9 @@ pub enum FeAction {
     /// The help bar's Customize button (car select).
     CustomizeCar,
     /// Pause menu (speed2.exe 0x4c2bd2 race, 0x4c2902 free run).
+    /// World map: a race (hash) chosen, and the "race this event?" answer.
+    WorldRace(u32),
+    ConfirmWorldRace(u32),
     /// Crib menu (UI_CareerCrib).
     ExploreMode,
     WorldMap,
@@ -99,6 +102,7 @@ pub enum FeKind {
     PostRaceStats,
     Credits,
     Crib,
+    WorldMap,
 }
 
 /// Credits.fng (speed2.exe 0x4b87b0): every line is a copy of CreditsArea running
@@ -276,6 +280,7 @@ pub struct FeScreen {
     results: Option<Results>,
     stats: Option<Stats>,
     credits: Option<Credits>,
+    world: Option<crate::fe_worldmap::WorldMap>,
 }
 
 #[derive(Default)]
@@ -327,6 +332,7 @@ fn help_flags(kind: FeKind) -> u32 {
         FeKind::PostRaceStats => 0x404,
         FeKind::Credits => 0x401,
         FeKind::Crib => 0x405,
+        FeKind::WorldMap => 0x8401,
         FeKind::Pause | FeKind::PauseOptionsMain => 0x30404,
         FeKind::PauseOptions => 0x10400,
     }
@@ -556,7 +562,7 @@ impl Frontend {
             }
         }
         let results = Results { rows, drift, time: 0.0 };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None, credits: None };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceResults, menu, list: None, list_kind: None, car: None, results: Some(results), stats: None, credits: None, world: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -605,7 +611,7 @@ impl Frontend {
         let mut menu = IconMenu::default();
         menu.hidden.extend(scene.index_of(h("_EVENT_HANDLER_")));
         let credits = Credits { slots, time: 0.0 };
-        let mut s = FeScreen { scene, kind: FeKind::Credits, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: Some(credits) };
+        let mut s = FeScreen { scene, kind: FeKind::Credits, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: Some(credits), world: None };
         s.apply(&data.strings);
         s.apply_credits(&data.credits);
         self.screen = Some(s);
@@ -649,10 +655,40 @@ impl Frontend {
         menu.arrows = [find(&scene, "ScrollBar_Arrow_1"), find(&scene, "ScrollBar_Arrow_2")];
         let racer = rows.iter().position(|r| r.player).unwrap_or(0);
         let stats = Stats { rows, racer, circuit, mph, from_menu, stat_objs, lap_objs, title, data: data_r, lap_time, lap_pos };
-        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats), credits: None };
+        let mut s = FeScreen { scene, kind: FeKind::PostRaceStats, menu, list: None, list_kind: None, car: None, results: None, stats: Some(stats), credits: None, world: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
+    }
+
+    /// The career world map with the stages unlocked and the races (stage, race).
+    pub fn open_world_map(&mut self, stages: Vec<u8>, races: Vec<(u8, crate::fe_worldmap::WorldRace)>, mph: bool) -> bool {
+        let Some(data) = &self.data else { return false };
+        let Some(pkg) = data.packages.iter().find(|p| p.name.eq_ignore_ascii_case("UI_CareerWorldMap.fng")) else { return false };
+        let mut scene = Scene::new(pkg.clone());
+        let world = crate::fe_worldmap::WorldMap::new(&mut scene, stages, races, mph);
+        let mut s = FeScreen {
+            scene,
+            kind: FeKind::WorldMap,
+            menu: IconMenu::default(),
+            list: None,
+            list_kind: None,
+            car: None,
+            results: None,
+            stats: None,
+            credits: None,
+            world: Some(world),
+        };
+        if let Some(w) = &mut s.world {
+            w.apply(&mut s.scene, &data.strings);
+        }
+        self.screen = Some(s);
+        true
+    }
+
+    /// The TRACKMAP the world map shows (to load).
+    pub fn wanted_track_map(&self) -> Option<u16> {
+        Some(self.screen.as_ref()?.world.as_ref()?.map_number())
     }
 
     /// The crib menu (UI_CareerCrib, speed2.exe 0x4af820): World Map only from stage 2 on.
@@ -845,7 +881,7 @@ impl Frontend {
         let (list, hidden) = OptionList::new(&mut scene, rows, visible);
         let mut menu = IconMenu::default();
         menu.hidden = hidden;
-        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None, credits: None };
+        let mut s = FeScreen { scene, kind, menu, list: Some(list), list_kind: Some(list_kind), car: None, results: None, stats: None, credits: None, world: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -876,7 +912,7 @@ impl Frontend {
         }
         let selected = cars.iter().position(|(n, _)| n.eq_ignore_ascii_case(current)).unwrap_or(0);
         let car = CarSelect { filters, filter: 0, cars, selected, settled: 0.0, mode_label };
-        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None, credits: None };
+        let mut s = FeScreen { scene, kind: FeKind::QuickRaceCar, menu, list: None, list_kind: None, car: Some(car), results: None, stats: None, credits: None, world: None };
         s.apply(&data.strings);
         s.apply_car(data);
         self.screen = Some(s);
@@ -940,6 +976,9 @@ impl Frontend {
 
     /// Up / down on a list screen.
     pub fn step_row(&mut self, delta: i32) -> bool {
+        if let Some(w) = self.screen.as_mut().and_then(|s| s.world.as_mut()) {
+            return w.step_row(delta);
+        }
         let Some(l) = self.screen.as_mut().and_then(|s| s.list.as_mut()) else { return false };
         l.step_row(delta);
         true
@@ -1005,7 +1044,7 @@ impl Frontend {
         for i in menu.arrows.into_iter().flatten() {
             scene.set_script(i, h("static"));
         }
-        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: None };
+        let mut s = FeScreen { scene, kind, menu, list: None, list_kind: None, car: None, results: None, stats: None, credits: None, world: None };
         s.apply(&data.strings);
         self.screen = Some(s);
         true
@@ -1032,6 +1071,10 @@ impl Frontend {
         }
         if let Some(c) = &mut s.credits {
             c.time += dt;
+        }
+        if let Some(w) = &mut s.world {
+            w.tick(dt);
+            w.apply(&mut s.scene, &data.strings);
         }
         s.apply_credits(&data.credits);
         let kind = s.kind;
@@ -1075,6 +1118,9 @@ impl Frontend {
             return true;
         }
         let Some(s) = &mut self.screen else { return false };
+        if let Some(w) = &mut s.world {
+            return w.step_stage(delta);
+        }
         if let Some(st) = &mut s.stats {
             let next = (st.racer as i32 + delta).clamp(0, st.rows.len() as i32 - 1) as usize;
             if next == st.racer {
@@ -1139,6 +1185,9 @@ impl Frontend {
         if s.stats.is_some() {
             return Some(FeAction::Back);
         }
+        if let Some(w) = &s.world {
+            return w.selected_race().map(|r| FeAction::WorldRace(r.hash));
+        }
         Some(s.menu.options.get(s.menu.selected)?.action)
     }
 
@@ -1182,6 +1231,13 @@ impl Frontend {
                     None
                 }
                 Tap::Nothing => None,
+            };
+        }
+        if self.screen.as_ref()?.world.is_some() {
+            let w = self.screen.as_mut()?.world.as_mut()?;
+            return match w.tap(vx - 320.0, vy - 240.0) {
+                crate::fe_worldmap::TapAction::Accept => w.selected_race().map(|r| FeAction::WorldRace(r.hash)),
+                crate::fe_worldmap::TapAction::None => None,
             };
         }
         if self.screen.as_ref()?.stats.is_some() {

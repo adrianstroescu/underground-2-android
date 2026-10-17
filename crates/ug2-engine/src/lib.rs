@@ -13,6 +13,8 @@ pub mod font;
 pub mod fe;
 pub mod fe_hud;
 pub mod fe_list;
+pub mod fe_worldmap;
+pub mod career_orig;
 mod frontend;
 pub mod hud;
 pub mod input;
@@ -171,6 +173,8 @@ pub struct Game {
     last_shift: Option<(Shift, u32)>,
     /// Driver names of the race's opponents (quick race).
     race_names: Vec<String>,
+    /// The original career race being run (hash).
+    career_race: Option<u32>,
     /// Steering input last frame (drag lane changes fire on a new press).
     lane_input: f32,
     /// Driver for the player's car when the `autopilot` test option is on.
@@ -231,6 +235,8 @@ pub struct Game {
     /// The menus are in the career branch (garage shows the shop and upgrades).
     in_career: bool,
     career_path: PathBuf,
+    /// The original career's progress (stage, races won and open).
+    progress: Option<career_orig::Progress>,
     /// Prize for the race in progress (career only) and whether it has been paid.
     race_prize: Option<(String, u32)>,
     prize_paid: Option<u32>,
@@ -313,6 +319,7 @@ impl Game {
             banner: None,
             last_shift: None,
             race_names: Vec::new(),
+            career_race: None,
             lane_input: 0.0,
             autopilot: None,
             autopilot_stuck: 0.0,
@@ -360,6 +367,7 @@ impl Game {
             career: None,
             in_career: false,
             career_path: config_dir.join("career.cfg"),
+            progress: None,
             race_prize: None,
             prize_paid: None,
             finish_timer: 0.0,
@@ -1094,6 +1102,14 @@ impl Game {
                 self.select_car(name);
             }
         }
+        // The world map's TRACKMAP.
+        if let Some(n) = self.fe.wanted_track_map() {
+            if self.fe_requested.insert(bin_hash(&format!("TRACKMAP{n}"))) {
+                if let Some(l) = &self.loader {
+                    l.request(LoadRequest::TrackMap(n));
+                }
+            }
+        }
         // Track maps load when a track is first shown.
         if let Some(t) = self.fe.wanted_texture() {
             if self.fe_requested.insert(t) {
@@ -1136,6 +1152,10 @@ impl Game {
                     let drift = self.session.race().is_some_and(|r| r.drift.is_some());
                     self.fe.open_results(rows, drift);
                 }
+                true
+            }
+            Some(fe::FeKind::WorldMap) => {
+                self.fe.open_crib(true);
                 true
             }
             Some(fe::FeKind::Crib) => {
@@ -1206,6 +1226,100 @@ impl Game {
             }
             _ => false,
         }
+    }
+
+    /// Loads the career and its original progress (a new career starts at stage 1).
+    fn ensure_career(&mut self) {
+        if self.career.is_none() {
+            let starter = self.player_car.clone().unwrap_or_else(|| "PEUGOT".into());
+            self.career = Some(career::Career::load(&self.career_path, &starter));
+        }
+        if self.progress.is_none() {
+            let path = self.career_path.with_file_name("career_progress.cfg");
+            let mut p = career_orig::Progress::load(&path);
+            if let Some(d) = &self.fe.data {
+                p.rebuild(&d.career, self.driving_suv());
+                p.save();
+            }
+            self.progress = Some(p);
+        }
+    }
+
+    fn driving_suv(&self) -> bool {
+        matches!(self.current_car().as_str(), "HUMMER" | "NAVIGATOR" | "ESCALADE")
+    }
+
+    /// The world map of the original career.
+    fn open_world_map(&mut self) {
+        self.ensure_career();
+        let (Some(p), Some(d)) = (&self.progress, &self.fe.data) else { return };
+        let races: Vec<(u8, fe_worldmap::WorldRace)> = d
+            .career
+            .races
+            .iter()
+            .filter(|r| r.hash != 0xdd60_e402 && r.hash != 0xdd60_e403)
+            .filter_map(|r| {
+                let heat = r.heats.first()?;
+                let &(length, view) = d.tracks.get(&heat.track)?;
+                Some((
+                    r.stage,
+                    fe_worldmap::WorldRace {
+                        hash: r.hash,
+                        kind: r.race_type,
+                        track: heat.track,
+                        length,
+                        view,
+                        completed: p.won.contains(&r.hash),
+                        best: None,
+                    },
+                ))
+            })
+            .collect();
+        let stages = p.stages();
+        let mph = self.hud.mph;
+        self.fe.open_world_map(stages, races, mph);
+    }
+
+    /// Starts a race of the original career: its first heat, its opponents' names and
+    /// cars (RANDOM → the AI pool), its story movie first.
+    fn start_career_race(&mut self, hash: u32) {
+        let Some(r) = self.fe.data.as_ref().and_then(|d| d.career.race(hash).cloned()) else { return };
+        let Some(heat) = r.heats.first().cloned() else { return };
+        let Some(mut info) = self.catalog.iter().find(|c| c.track == heat.track).cloned() else {
+            log::warn!("career race {}: track {} not installed", r.name, heat.track);
+            return;
+        };
+        info.reverse = heat.reverse;
+        info.movie_before = r.movie_before.clone();
+        info.movie_after = r.movie_after.clone();
+        if let Some(m) = &r.movie_before {
+            self.play_movie(m);
+            if m.eq_ignore_ascii_case("SCENE20") {
+                self.play_movie("DriftTut");
+            }
+        }
+        const POOL: [&str; 26] = [
+            "SKYLINE", "ECLIPSE", "SUPRA", "350Z", "CELICA", "TIBURON", "GOLF", "RX8", "COROLLA", "IS300", "IMPREZAWRX", "LANCEREVO8", "MUSTANGGT",
+            "MIATA", "RX7", "240SX", "FOCUS", "PEUGOT", "3000GT", "G35", "TT", "A3", "SENTRA", "GTO", "CIVIC", "RSX",
+        ];
+        let pool: Vec<&str> = POOL.iter().copied().filter(|c| self.racers.iter().any(|x| x == c)).collect();
+        let mut seed = (self.title_time * 1000.0) as u32 | 1;
+        let mut opponents = Vec::new();
+        let mut names = Vec::new();
+        for o in &r.opponents {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            // Car presets (non-RANDOM hashes) are not decoded yet: an AI pool car.
+            let car = pool.get(seed as usize % pool.len().max(1)).copied().unwrap_or("CIVIC");
+            opponents.push((car.to_string(), PAINTS[seed as usize % PAINTS.len()].1));
+            names.push(o.name.clone());
+        }
+        let laps = if info.mode.laps() { (heat.laps as u32).max(1) } else { 1 };
+        let p = frontend::PendingRace { race: info, laps, opponents, career: Some((r.name.clone(), r.prize, 0.0)), knockout: false, names };
+        self.career_race = Some(hash);
+        self.quick.last = Some(p.clone());
+        self.pending_race = Some(p);
     }
 
     /// Puts the Options values into effect where the port has the feature.
@@ -1293,7 +1407,8 @@ impl Game {
     fn fe_action(&mut self, a: fe::FeAction) {
         let row = match a {
             fe::FeAction::Career => {
-                let in_progress = self.career.as_ref().is_some_and(|c| !c.won.is_empty() || c.owned.len() > 1);
+                let in_progress = self.career.as_ref().is_some_and(|c| !c.won.is_empty() || c.owned.len() > 1)
+                    || self.career_path.with_file_name("career_progress.cfg").exists();
                 if !self.fe.open_start_career(in_progress) {
                     self.fe_go(frontend::Row::Career);
                 }
@@ -1301,6 +1416,7 @@ impl Game {
             }
             fe::FeAction::ResumeCareer => {
                 // Resume lands on the crib menu (speed2.exe 0x495a30).
+                self.ensure_career();
                 if !self.fe.open_crib(true) {
                     self.fe_go(frontend::Row::Career);
                 }
@@ -1314,7 +1430,26 @@ impl Game {
                 return;
             }
             fe::FeAction::ConfirmExplore => frontend::Row::FreeRoam,
-            fe::FeAction::WorldMap => frontend::Row::Career,
+            fe::FeAction::WorldMap => {
+                self.open_world_map();
+                return;
+            }
+            fe::FeAction::WorldRace(hash) => {
+                // Only races the career has opened (or already won) can be raced.
+                let ok = self.progress.as_ref().is_some_and(|p| p.open.contains(&hash) || p.won.contains(&hash));
+                if ok {
+                    let buttons = vec![(0x8857_9775, fe::FeAction::ConfirmWorldRace(hash)), (0xbe50_3981, fe::FeAction::CloseDialog)];
+                    if self.fe.open_dialog(0xec94_88bb, buttons) {
+                        // The default answer is No.
+                        self.fe.step(1);
+                    }
+                }
+                return;
+            }
+            fe::FeAction::ConfirmWorldRace(hash) => {
+                self.start_career_race(hash);
+                return;
+            }
             fe::FeAction::CareerCarSelect | fe::FeAction::ChangeParts => {
                 self.in_career = true;
                 frontend::Row::Garage
@@ -1346,9 +1481,11 @@ impl Game {
                     log::info!("new career: a career is in progress");
                     return;
                 }
-                // A new career opens with scene01 (speed2.exe 0x53d710).
+                // A new career opens with scene01 (speed2.exe 0x53d710), then the crib.
                 self.play_movie("Scene01");
-                frontend::Row::Career
+                self.ensure_career();
+                self.fe.open_crib(true);
+                return;
             }
             fe::FeAction::LoadGame => {
                 log::info!("load game is not available");
@@ -1708,6 +1845,33 @@ impl Game {
     /// Career prize, once per race, when the player crosses the line.
     fn pay_prize(&mut self) {
         if self.prize_paid.is_some() {
+            return;
+        }
+        // The original career: a win pays the race's prize and may advance the stage.
+        if let Some(hash) = self.career_race {
+            let place = self.session.race().map_or(9, |r| r.place(0));
+            let suv = self.driving_suv();
+            let mut prize = 0;
+            if place == 1 {
+                if let (Some(p), Some(d)) = (&mut self.progress, &self.fe.data) {
+                    let out = p.on_win(&d.career, hash, suv);
+                    prize = out.prize;
+                    if out.new_stage == Some(2) {
+                        // Stage 1 → 2: Scene07 and the Upper Class introduction.
+                        self.play_movie("Scene07");
+                        self.play_movie("UpperClass");
+                    }
+                }
+                if let Some(c) = &mut self.career {
+                    c.cash += prize;
+                    c.save();
+                }
+                if let Some(m) = self.session.race().and_then(|r| r.def.info.movie_after.clone()) {
+                    self.play_movie(&m);
+                }
+            }
+            self.prize_paid = Some(prize);
+            log::info!("career race {hash:08x}: place {place}, prize ${prize}");
             return;
         }
         let place = self.session.race().map_or(9, |r| r.place(0));

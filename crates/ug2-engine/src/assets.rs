@@ -773,6 +773,9 @@ pub struct FrontendData {
     pub explore_map: Option<[f32; 4]>,
     /// The credits (CREDITS/NA_ENGLISH.TXT, UTF-16), one entry per line.
     pub credits: Vec<String>,
+    /// The career data (races, stages) and, per track number, (length m, TRACKMAP view).
+    pub career: ug2_formats::career::CareerData,
+    pub tracks: HashMap<u16, (u32, [f32; 3])>,
 }
 
 /// The frontend packages (FRONTEND/FrontB), English strings and fonts, and every texture
@@ -856,8 +859,14 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     let mut ratings = HashMap::new();
     let mut engines = HashMap::new();
     let mut explore_map = None;
+    let mut career = ug2_formats::career::CareerData::default();
+    let mut tracks = HashMap::new();
     if let Ok(gb) = game.read_unpacked("GLOBAL/GLOBALB.BUN") {
         ratings = ug2_formats::carstats::car_ratings(&gb).into_iter().collect();
+        career = ug2_formats::career::parse(&gb).unwrap_or_default();
+        if let Ok(t) = ug2_formats::route::parse_track_infos(&gb) {
+            tracks = t.iter().map(|t| (t.number, (t.length, t.map_view))).collect();
+        }
         explore_map = ug2_formats::route::parse_track_infos(&gb)
             .ok()
             .and_then(|t| t.into_iter().find(|t| t.number == 4000))
@@ -893,7 +902,7 @@ fn load_frontend(game: &GameDir, bc: bool, tx: &Sender<LoadEvent>) -> anyhow::Re
     log::info!("frontend: {} packages, {} strings, {} fonts, {} textures in {:.2?}", packages.len(), strings.len(), fonts.len(), out.len(), t0.elapsed());
     let textures = opaque.iter().map(|(h, _)| *h).collect();
     let _ = tx.send(LoadEvent::FeTextures(out, opaque));
-    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines, explore_map, credits })));
+    let _ = tx.send(LoadEvent::Frontend(Box::new(FrontendData { packages, strings, fonts, textures, cars, ratings, engines, explore_map, credits, career, tracks })));
     Ok(())
 }
 
